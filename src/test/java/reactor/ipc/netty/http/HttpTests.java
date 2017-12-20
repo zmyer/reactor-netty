@@ -284,4 +284,35 @@ public class HttpTests {
 
 		server.dispose();
 	}
+
+	@Test
+	public void test100Continue() throws Exception {
+		CountDownLatch latch = new CountDownLatch(1);
+		NettyContext server =
+				HttpServer.create(0)
+				          .newHandler((req, res) -> req.receive()
+				                                       .aggregate()
+				                                       .asString()
+				                                       .map(s -> {
+				                                           latch.countDown();
+				                                           return res.sendString(Mono.just(s));
+				                                       })
+				                                       .then())
+				          .block(Duration.ofSeconds(30));
+
+		String content =
+				HttpClient.create(server.address().getPort())
+				          .post("/", req -> req.header("Expect", "100-continue")
+				                               .sendString(Flux.just("1", "2", "3", "4", "5")))
+				          .flatMap(res -> res.receive()
+				                             .aggregate()
+				                             .asString())
+				          .block(Duration.ofSeconds(30));
+
+		System.out.println(content);
+
+		Assertions.assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue();
+
+		server.dispose();
+	}
 }
