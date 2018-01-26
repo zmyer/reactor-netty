@@ -205,7 +205,7 @@ final class WebsocketClientOperations extends HttpClientOperations
 		}
 	}
 
-	void sendClose(CloseWebSocketFrame frame) {
+	void sendClose(@Nullable CloseWebSocketFrame frame) {
 		if (frame != null && !frame.isFinalFragment()) {
 			channel().writeAndFlush(frame);
 			return;

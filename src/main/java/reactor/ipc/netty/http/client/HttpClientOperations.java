@@ -469,6 +469,7 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 
 
 	@Override
+	@Nullable
 	public WebsocketInbound receiveWebsocket() {
 		return null;
 	}
