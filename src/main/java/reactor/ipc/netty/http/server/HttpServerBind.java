@@ -17,6 +17,7 @@
 package reactor.ipc.netty.http.server;
 
 import java.util.Objects;
+import java.util.function.Function;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelPipeline;
@@ -32,6 +33,7 @@ import reactor.ipc.netty.channel.BootstrapHandlers;
 import reactor.ipc.netty.http.HttpResources;
 import reactor.ipc.netty.resources.LoopResources;
 import reactor.ipc.netty.tcp.TcpServer;
+import reactor.util.annotation.Nullable;
 
 import static reactor.ipc.netty.http.server.HttpRequestDecoderConfiguration.DEFAULT_INITIAL_BUFFER_SIZE;
 import static reactor.ipc.netty.http.server.HttpRequestDecoderConfiguration.DEFAULT_MAX_CHUNK_SIZE;
@@ -47,7 +49,7 @@ import static reactor.ipc.netty.http.server.HttpRequestDecoderConfiguration.VALI
 /**
  * @author Stephane Maldini
  */
-final class HttpServerBind extends HttpServer {
+final class HttpServerBind extends HttpServer implements Function<ServerBootstrap, ServerBootstrap> {
 
 	static final HttpServerBind INSTANCE = new HttpServerBind();
 
@@ -69,15 +71,12 @@ final class HttpServerBind extends HttpServer {
 	@Override
 	@SuppressWarnings("unchecked")
 	public Mono<? extends DisposableServer> bind(TcpServer delegate) {
-		ServerBootstrap b;
-		try {
-			b = delegate.configure();
-		}
-		catch (Throwable t) {
-			Exceptions.throwIfFatal(t);
-			return Mono.error(t);
-		}
+		return delegate.bootstrap(this)
+		               .bind();
+	}
 
+	@Override
+	public ServerBootstrap apply(ServerBootstrap b) {
 		if (b.config()
 		     .group() == null) {
 			LoopResources loops = HttpResources.get();
@@ -119,14 +118,16 @@ final class HttpServerBind extends HttpServer {
 					p.addLast(NettyPipeline.HttpServerHandler,
 							new HttpServerHandler(listener));
 				});
-
-		return delegate.bind(b);
+		return b;
 	}
 
 	static final AttributeKey<Integer> PRODUCE_GZIP =
 			AttributeKey.newInstance("produceGzip");
 
-	private <T> T getAttributeValue(ServerBootstrap bootstrap, AttributeKey<T> attributeKey, T defaultValue) {
+	@SuppressWarnings("unchecked")
+	@Nullable
+	static  <T> T getAttributeValue(ServerBootstrap bootstrap, AttributeKey<T>
+			attributeKey, @Nullable T defaultValue) {
 		T result = bootstrap.config().attrs().get(attributeKey) != null
 				? (T) bootstrap.config().attrs().get(attributeKey)
 				: defaultValue;

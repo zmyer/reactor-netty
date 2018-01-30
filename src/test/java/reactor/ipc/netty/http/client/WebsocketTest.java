@@ -17,8 +17,10 @@
 package reactor.ipc.netty.http.client;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import io.netty.handler.codec.http.HttpMethod;
@@ -29,6 +31,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxProcessor;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.ReplayProcessor;
+import reactor.core.scheduler.Schedulers;
 import reactor.ipc.netty.DisposableServer;
 import reactor.ipc.netty.http.server.HttpServer;
 import reactor.test.StepVerifier;
@@ -76,6 +79,68 @@ public class WebsocketTest {
 				          .get(0);
 
 		Assert.assertThat(res, is("test"));
+	}
+
+
+
+	@Test
+	public void webSocketRespondsToRequestsFromClients() {
+		AtomicInteger clientRes = new AtomicInteger();
+		AtomicInteger serverRes = new AtomicInteger();
+
+		DisposableServer server =
+				HttpServer.create()
+				          .port(0)
+				          .router(r -> r.get("/test/{param}", (req, res) -> {
+					          System.out.println(req.requestHeaders().get("test"));
+					          return res.header("content-type", "text/plain")
+					                    .sendWebsocket((in, out) ->
+							                    out.options(c -> c.flushOnEach())
+							                       .sendString(in.receive()
+							                                     .asString()
+							                                     .publishOn(Schedulers.single())
+							                                     .doOnNext(s -> serverRes.incrementAndGet())
+							                                     .map(it -> it + ' ' + req.param("param") + '!')
+							                                     .log("server-reply")));
+				          }))
+				          .wiretap()
+				          .bindNow(Duration.ofSeconds(5));
+
+		HttpClient client = HttpClient.prepare()
+		                              .port(server.address().getPort())
+		                              .wiretap();
+
+		Mono<List<String>> response =
+				client.request(HttpMethod.GET)
+				      .uri("/test/World")
+				      .send((req, out) ->
+						      req.header("Content-Type", "text/plain")
+						         .header("test", "test")
+						         .options(c -> c.flushOnEach())
+						         .sendWebsocket()
+						         .sendString(Flux.range(1, 1000)
+						                         .log("client-send")
+						                         .map(i -> "" + i)))
+				      .responseContent()
+				      .asString()
+				      .log("client-received")
+				      .publishOn(Schedulers.parallel())
+				      .doOnNext(s -> clientRes.incrementAndGet())
+				      .take(1000)
+				      .collectList()
+				      .cache()
+				      .doOnError(i -> System.err.println("Failed requesting server: " + i));
+
+		System.out.println("STARTING: server[" + serverRes.get() + "] / client[" + clientRes.get() + "]");
+
+		StepVerifier.create(response)
+		            .expectNextMatches(list -> "1000 World!".equals(list.get(999)))
+		            .expectComplete()
+		            .verify(Duration.ofSeconds(10));
+
+		System.out.println("FINISHED: server[" + serverRes.get() + "] / client[" + clientRes + "]");
+
+		server.dispose();
 	}
 
 //	static final byte[] testData;

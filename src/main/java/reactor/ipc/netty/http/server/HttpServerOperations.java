@@ -80,12 +80,7 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	@SuppressWarnings("unchecked")
 	static HttpServerOperations bindHttp(Connection connection, ConnectionEvents listener,
 			Object msg, boolean forwarded) {
-		HttpServerOperations ops =
-				new HttpServerOperations(connection, listener, (HttpRequest) msg, forwarded);
-
-		listener.onStart(ops);
-
-		return ops;
+		return new HttpServerOperations(connection, listener, (HttpRequest) msg, forwarded);
 	}
 
 	final HttpResponse nettyResponse;
@@ -488,30 +483,22 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 			WebsocketServerOperations
 					ops = new WebsocketServerOperations(url, protocols, this);
 
-			return FutureMono.from(ops.handshakerResult)
-			                 .then(Mono.defer(() -> {
-				                 	//skip handler if no matching subprotocol
+			if (replace(ops)) {
+				return FutureMono.from(ops.handshakerResult)
+				                 .then(Mono.defer(() -> {
+					                 //skip handler if no matching subprotocol
 					                 if (protocols != null && ops.selectedSubprotocol() == null) {
 						                 return Mono.empty();
 					                 }
 					                 return Mono.from(websocketHandler.apply(ops, ops));
 				                 }))
-			                 .doAfterSuccessOrError(ops);
+				                 .doAfterSuccessOrError(ops);
+			}
 		}
 		else {
 			log.error("Cannot enable websocket if headers have already been sent");
 		}
 		return Mono.error(new IllegalStateException("Failed to upgrade to websocket"));
-	}
-
-	@Override
-	final protected void handleOutboundWithNoContent() {
-		int status = nettyResponse.status().code();
-		if (status == 204 || status == 205 || status == 304) {
-			nettyResponse.headers()
-			             .remove(HttpHeaderNames.TRANSFER_ENCODING)
-			             .set(HttpHeaderNames.CONTENT_LENGTH, 0);
-		}
 	}
 
 	static final Logger log = Loggers.getLogger(HttpServerOperations.class);

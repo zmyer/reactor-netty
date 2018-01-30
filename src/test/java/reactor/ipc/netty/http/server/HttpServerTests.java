@@ -95,7 +95,6 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 public class HttpServerTests {
 
 	@Test
-	@Ignore
 	public void defaultHttpPort() {
 		DisposableServer blockingFacade = HttpServer.create()
 		                                      .handler((req, resp) -> resp.sendNotFound())
@@ -222,7 +221,7 @@ public class HttpServerTests {
 	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn) {
 		DisposableServer context =
 				HttpServer.create()
-				          .tcpConfiguration(tcpServer -> tcpServer.host("localhost"))
+				          .port(0)
 				          .handler((req, resp) -> fn.apply(resp))
 				          .wiretap()
 				          .bindNow();
@@ -230,7 +229,7 @@ public class HttpServerTests {
 
 		String body =
 				HttpClient.prepare()
-				          .addressSupplier(() -> context.address())
+				          .addressSupplier(context::address)
 				          .wiretap()
 				          .get()
 				          .uri("/foo")
@@ -505,7 +504,7 @@ public class HttpServerTests {
 		Flux<String> client = HttpClient.prepare()
 		                                .port(c.address().getPort())
 		                                .wiretap()
-		                                .doOnResponse(res -> res.addHandler(new LineBasedFrameDecoder(10)))
+		                                .tcpConfiguration(tcp -> tcp.doOnConnected(res -> res.addHandler(new LineBasedFrameDecoder(10))))
 		                                .get()
 		                                .uri("/")
 		                                .responseContent()
@@ -535,7 +534,7 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/index.html")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
 
 		Channel response1 = HttpClient.prepare()
@@ -543,7 +542,7 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/test.css")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
 
 		Channel response2 = HttpClient.prepare()
@@ -551,7 +550,7 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/test1.css")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
 
 		Channel response3 = HttpClient.prepare()
@@ -559,7 +558,7 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/test2.css")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
 
 		Channel response4 = HttpClient.prepare()
@@ -567,7 +566,7 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/test3.css")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
 
 		Channel response5 = HttpClient.prepare()
@@ -575,21 +574,14 @@ public class HttpServerTests {
 		                              .wiretap()
 		                              .get()
 		                              .uri("/test/test4.css")
-		                              .responseSingle((res, buf) -> Mono.just(res.channel()))
+		                              .responseSingle((res, buf) -> Mono.just(res.channel()).delayUntil(r -> res.receive()))
 		                              .block(Duration.ofSeconds(30));
-/* TODO disable pool?
-		HttpClientResponse response6 = HttpClient.create(opts -> opts.port(c.address().getPort())
-		                                                             .disablePool())
-		                                         .get("/test/test5.css")
-		                                         .block(Duration.ofSeconds(30));
-*/
+
 		Assert.assertEquals(response0, response1);
 		Assert.assertEquals(response0, response2);
 		Assert.assertEquals(response0, response3);
 		Assert.assertEquals(response0, response4);
 		Assert.assertEquals(response0, response5);
-		//TODO
-		//Assert.assertNotEquals(response0, response6);
 
 		HttpResources.reset();
 		c.dispose();
@@ -792,10 +784,7 @@ public class HttpServerTests {
 				          .addressSupplier(() -> address)
 				          .wiretap()
 				          .request(method)
-				          .send((req, out) -> {
-				                 req.send();
-				                 return out;
-				          })
+				          .uri(url)
 				          .responseSingle((res, buf) -> Mono.zip(Mono.just(res.responseHeaders()),
 				                                                 buf.asString()
 				                                                    .defaultIfEmpty("NO BODY")));
@@ -831,7 +820,7 @@ public class HttpServerTests {
 				        }
 				    })
 				    .expectComplete()
-				    .verify();
+				    .verify(Duration.ofSeconds(30));
 	}
 
 	@Test
@@ -907,68 +896,6 @@ public class HttpServerTests {
 
 		r.dispose();
 		server.dispose();
-	}
-
-	final int numberOfTests = 1000;
-
-	@Test
-	@Ignore
-	public void deadlockWhenRedirectsToSameUrl(){
-		redirectTests("/login");
-	}
-
-	@Test
-	@Ignore
-	public void okWhenRedirectsToOther(){
-		redirectTests("/other");
-	}
-
-	public void redirectTests(String url) {
-		DisposableServer server = HttpServer.create()
-		                                    .tcpConfiguration(tcp -> tcp.host("localhost"))
-		                                    .port(9999)
-		                                .handler((req, res) -> {
-			                                if (req.uri()
-			                                       .contains("/login") && req.method()
-			                                                                 .equals(HttpMethod.POST)) {
-				                                return Mono.<Void>fromRunnable(() -> {
-					                                res.header("Location",
-							                                "http://localhost:9999" +
-									                                url).status(HttpResponseStatus.FOUND);
-				                                })
-						                                .publishOn(Schedulers.elastic());
-			                                }
-			                                else {
-				                                return Mono.fromRunnable(() -> {
-				                                })
-				                                           .publishOn(Schedulers.elastic())
-				                                           .then(res.status(200)
-				                                                    .sendHeaders()
-				                                                    .then());
-			                                }
-		                                })
-		                                .bindNow(Duration.ofSeconds(30));
-
-		PoolResources pool = PoolResources.fixed("test", 1);
-
-		HttpClient client =
-				HttpClient.prepare(pool)
-				          .addressSupplier(() -> server.address());
-
-		try {
-			Flux.range(0, this.numberOfTests)
-			    .concatMap(i -> client.followRedirect()
-			                          .post()
-					                  .uri("/login")
-			                          .responseContent()
-			                          .log("reactor.req."+i)
-			                          .then())
-			    .blockLast();
-		}
-		finally {
-			server.dispose();
-		}
-
 	}
 
 	@Test
