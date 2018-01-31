@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -459,7 +460,7 @@ static final AttributeKey<String>  SUBPROTOCOLS  = AttributeKey.newInstance("sub
 			public String selectedSubprotocol() {
 				if (clientOps.isWebsocket()) {
 					WebsocketClientOperations ops =
-							(WebsocketClientOperations) clientOps.get(clientOps.channel());
+							(WebsocketClientOperations) ChannelOperations.get(clientOps.channel());
 
 					assert ops != null;
 					return ops.selectedSubprotocol();
