@@ -48,7 +48,6 @@ import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyInbound;
 import reactor.ipc.netty.NettyOutbound;
 import reactor.ipc.netty.NettyPipeline;
-import reactor.ipc.netty.channel.AbortedException;
 import reactor.ipc.netty.channel.ChannelOperations;
 import reactor.ipc.netty.channel.ContextHandler;
 import reactor.ipc.netty.channel.data.AbstractFileChunkedStrategy;
@@ -100,58 +99,48 @@ public abstract class HttpOperations<INBOUND extends NettyInbound, OUTBOUND exte
 	//@Override
 	//TODO document this
 	public NettyOutbound sendHeaders() {
-		if (markSentHeaders()) {
-			if (HttpUtil.isContentLengthSet(outboundHttpMessage())) {
-				outboundHttpMessage().headers()
-				                     .remove(HttpHeaderNames.TRANSFER_ENCODING);
-			}
-
-			HttpMessage message;
-			if (!HttpUtil.isTransferEncodingChunked(outboundHttpMessage())
-					&& (!HttpUtil.isContentLengthSet(outboundHttpMessage()) ||
-			HttpUtil.getContentLength(outboundHttpMessage(), 0) == 0)) {
-				if(isKeepAlive() && markSentBody()){
-					message = newFullEmptyBodyMessage();
-				}
-				else {
-					markPersistent(false);
-					message = outboundHttpMessage();
-				}
-			}
-			else {
-				message = outboundHttpMessage();
-			}
-			return then(FutureMono.deferFuture(() -> {
-				if(!channel().isActive()){
-					throw new AbortedException();
-				}
-				return channel().writeAndFlush(message);
-			}));
-		}
-		else {
+		if (hasSentHeaders()) {
 			return this;
 		}
+
+		return then(Mono.empty());
 	}
 
 	@Override
 	public Mono<Void> then() {
-		if (markSentHeaders()) {
-			if (HttpUtil.isContentLengthSet(outboundHttpMessage())) {
-				outboundHttpMessage().headers()
-				                     .remove(HttpHeaderNames.TRANSFER_ENCODING);
-			}
-
-			if (!HttpUtil.isTransferEncodingChunked(outboundHttpMessage())
-					&& !HttpUtil.isContentLengthSet(outboundHttpMessage())) {
-				markPersistent(false);
-			}
-
-			return FutureMono.deferFuture(() -> channel().writeAndFlush(outboundHttpMessage()));
-		}
-		else {
+		if (hasSentHeaders()) {
 			return Mono.empty();
 		}
+
+		return FutureMono.deferFuture(() -> {
+			if (markSentHeaders()) {
+				HttpMessage msg;
+
+				if (HttpUtil.isContentLengthSet(outboundHttpMessage())) {
+					outboundHttpMessage().headers()
+					                     .remove(HttpHeaderNames.TRANSFER_ENCODING);
+					if (HttpUtil.getContentLength(outboundHttpMessage(), 0) == 0) {
+						msg = newFullEmptyBodyMessage();
+					}
+					else {
+						msg = outboundHttpMessage();
+					}
+				}
+				else {
+					msg = outboundHttpMessage();
+				}
+
+				preSendHeadersAndStatus();
+
+				return channel().writeAndFlush(msg);
+			}
+			else {
+				return channel().newSucceededFuture();
+			}
+		});
 	}
+
+	protected abstract void preSendHeadersAndStatus();
 
 	protected abstract HttpMessage newFullEmptyBodyMessage();
 
@@ -179,14 +168,12 @@ public abstract class HttpOperations<INBOUND extends NettyInbound, OUTBOUND exte
 	}
 
 	@Override
-	public FileChunkedStrategy getFileChunkedStrategy() {
+	public FileChunkedStrategy<?> getFileChunkedStrategy() {
 		return new AbstractFileChunkedStrategy<HttpContent>() {
-
 			@Override
-			public ChunkedInput<HttpContent> chunkFile(FileChannel fileChannel) {
+			public ChunkedInput<HttpContent> chunkFile(FileChannel fileChannel, long offset, long length, int chunkSize) {
 				try {
-					//TODO tune the chunk size
-					return new HttpChunkedInput(new ChunkedNioFile(fileChannel, 1024));
+					return new HttpChunkedInput(new ChunkedNioFile(fileChannel, offset, length, chunkSize));
 				}
 				catch (IOException e) {
 					throw Exceptions.propagate(e);
@@ -276,6 +263,7 @@ public abstract class HttpOperations<INBOUND extends NettyInbound, OUTBOUND exte
 	 */
 	protected abstract HttpMessage outboundHttpMessage();
 
+	@SuppressWarnings("rawtypes")
 	final static AtomicIntegerFieldUpdater<HttpOperations> HTTP_STATE =
 			AtomicIntegerFieldUpdater.newUpdater(HttpOperations.class,
 					"statusAndHeadersSent");

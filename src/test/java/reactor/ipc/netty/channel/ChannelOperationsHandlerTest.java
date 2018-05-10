@@ -21,6 +21,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.Charset;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -41,6 +42,8 @@ import reactor.ipc.netty.http.client.HttpClientResponse;
 import reactor.ipc.netty.http.server.HttpServer;
 import reactor.ipc.netty.resources.PoolResources;
 import reactor.test.StepVerifier;
+import reactor.util.Logger;
+import reactor.util.Loggers;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -128,15 +131,16 @@ public class ChannelOperationsHandlerTest {
 				HttpClient.create(ops -> ops.host("localhost")
 				                            .port(abortServerPort))
 				          .get("/",
-						          req -> req.sendHeaders()
-						                    .sendString(Flux.just("a", "b", "c")));
+						          req -> req.sendString(Flux.just("a", "b", "c")));
 
-		StepVerifier.create(response)
-		            .expectError()
+		StepVerifier.create(response.log())
+		            .expectErrorMessage("Connection closed prematurely")
 		            .verify();
 
 		abortServer.close();
 	}
+
+	static final Logger log = Loggers.getLogger(ChannelOperationsHandlerTest.class);
 
 	private static final class ConnectionAbortServer extends CountDownLatch implements Runnable {
 
@@ -166,22 +170,18 @@ public class ChannelOperationsHandlerTest {
 				thread = Thread.currentThread();
 				while (true) {
 					SocketChannel ch = server.accept();
-
 					while (true) {
 						int bytes = ch.read(ByteBuffer.allocate(256));
 						if (bytes > 0) {
-							if (!read) {
-								read = true;
-							}
-							else {
-								ch.close();
-								return;
-							}
+							ch.close();
+							server.socket().close();
+							return;
 						}
 					}
 				}
 			}
 			catch (IOException e) {
+				log.error("", e);
 			}
 		}
 
@@ -258,7 +258,7 @@ public class ChannelOperationsHandlerTest {
 							"Transfer-Encoding: chunked\r\n" +
 							"\r\n" +
 							"0\r\n" +
-							"\r\n").getBytes();
+							"\r\n").getBytes(Charset.defaultCharset());
 
 					int written = ch.write(ByteBuffer.wrap(buffer));
 					if (written < 0) {

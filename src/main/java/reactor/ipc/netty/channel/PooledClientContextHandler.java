@@ -55,12 +55,13 @@ final class PooledClientContextHandler<CHANNEL extends Channel>
 
 	volatile Future<CHANNEL> future;
 
+	@SuppressWarnings("rawtypes")
 	static final AtomicReferenceFieldUpdater<PooledClientContextHandler, Future> FUTURE =
 			AtomicReferenceFieldUpdater.newUpdater(PooledClientContextHandler.class,
 					Future.class,
 					"future");
 
-	static final Future DISPOSED = new SucceededFuture<>(null, null);
+	static final Future<?> DISPOSED = new SucceededFuture<>(null, null);
 
 	PooledClientContextHandler(ChannelOperations.OnNew<CHANNEL> channelOpFactory,
 			ClientOptions options,
@@ -178,8 +179,7 @@ final class PooledClientContextHandler<CHANNEL extends Channel>
 	final void connectOrAcquire(CHANNEL c) {
 		if (DISPOSED == this.future) {
 			if (log.isDebugEnabled()) {
-				log.debug("Dropping acquisition {} because of {}",
-						"asynchronous user cancellation");
+				log.debug("Dropping acquisition because of asynchronous user cancellation");
 			}
 			disposeOperationThenRelease(c);
 			sink.success();
@@ -187,7 +187,7 @@ final class PooledClientContextHandler<CHANNEL extends Channel>
 		}
 
 		if (!c.isActive()) {
-			log.debug("Immediately aborted pooled channel, re-acquiring new " + "channel: {}",
+			log.debug("Immediately aborted pooled channel, re-acquiring new channel: {}",
 					c.toString());
 			setFuture(pool.acquire());
 			return;

@@ -19,11 +19,13 @@ package reactor.ipc.netty.http.client;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.cert.CertificateException;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -52,6 +54,7 @@ import reactor.core.publisher.Mono;
 import reactor.ipc.netty.FutureMono;
 import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.channel.AbortedException;
+import reactor.ipc.netty.http.HttpResources;
 import reactor.ipc.netty.http.server.HttpServer;
 import reactor.ipc.netty.options.ClientProxyOptions.Proxy;
 import reactor.ipc.netty.resources.PoolResources;
@@ -111,6 +114,8 @@ public class HttpClientTest {
 		resp.dispose();
 
 		x.dispose();
+
+		pool.dispose();
 	}
 
 	DefaultFullHttpResponse response() {
@@ -196,6 +201,7 @@ public class HttpClientTest {
 		}
 
 		x.dispose();
+		pool.dispose();
 		Assert.fail("Not aborted");
 	}
 
@@ -401,14 +407,14 @@ public class HttpClientTest {
 				                                 c -> c.chunkedTransfer(false)
 				                                       .failOnClientError(false)
 				                                       .sendString(Flux.just("hello")))
-		                                 .block(Duration.ofSeconds(30));
+		                                 .block();
 
 		FutureMono.from(r.context()
 		                 .channel()
 		                 .closeFuture())
 		          .block(Duration.ofSeconds(5));
 
-		Assert.assertTrue(r.status() == HttpResponseStatus.NOT_FOUND);
+		Assert.assertTrue(Objects.equals(r.status(), HttpResponseStatus.NOT_FOUND));
 		r.dispose();
 	}
 
@@ -426,7 +432,7 @@ public class HttpClientTest {
 		                 .closeFuture())
 		          .block(Duration.ofSeconds(5));
 
-		Assert.assertTrue(r.status() == HttpResponseStatus.NOT_FOUND);
+		Assert.assertTrue(Objects.equals(r.status(), HttpResponseStatus.NOT_FOUND));
 		r.dispose();
 	}
 
@@ -449,26 +455,36 @@ public class HttpClientTest {
 		                   .channel() == r2.context()
 		                                   .channel());
 
-		Assert.assertTrue(r.status() == HttpResponseStatus.NOT_FOUND);
+		Assert.assertTrue(Objects.equals(r.status(), HttpResponseStatus.NOT_FOUND));
 		r.dispose();
 		r2.dispose();
+		p.dispose();
 	}
 
 	@Test
 	public void disableChunkImplicitDefault() throws Exception {
-		HttpClientResponse r = HttpClient.create("google.com")
-		                                 .get("/unsupportedURI",
+		PoolResources p = PoolResources.fixed("test", 1);
+
+		HttpClientResponse r = HttpClient.create(opts -> opts.poolResources(p))
+		                                 .get("http://google.com/unsupportedURI",
 				                                 c -> c.chunkedTransfer(false)
 				                                       .failOnClientError(false))
 		                                 .block(Duration.ofSeconds(30));
 
-		FutureMono.from(r.context()
-		                 .channel()
-		                 .closeFuture())
-		          .block(Duration.ofSeconds(5));
+		HttpClientResponse r2 = HttpClient.create(opts -> opts.poolResources(p))
+		                                  .get("http://google.com/unsupportedURI",
+				                                 c -> c.chunkedTransfer(false)
+				                                       .failOnClientError(false))
+		                                 .block(Duration.ofSeconds(30));
 
-		Assert.assertTrue(r.status() == HttpResponseStatus.NOT_FOUND);
+		Assert.assertTrue(r.context()
+		                   .channel() == r2.context()
+		                                   .channel());
+
+		Assert.assertTrue(Objects.equals(r.status(), HttpResponseStatus.NOT_FOUND));
 		r.dispose();
+		r2.dispose();
+		p.dispose();
 	}
 
 	@Test
@@ -488,9 +504,10 @@ public class HttpClientTest {
 				                                        .sendString(Mono.just(" ")))
 		                                  .block(Duration.ofSeconds(30));
 
-		Assert.assertTrue(r.status() == HttpResponseStatus.BAD_REQUEST);
+		Assert.assertTrue(Objects.equals(r.status(), HttpResponseStatus.BAD_REQUEST));
 		r.dispose();
 		r1.dispose();
+		fixed.dispose();
 	}
 
 	@Test
@@ -548,24 +565,28 @@ public class HttpClientTest {
 
 	@Test
 	public void gzip() {
+
+		String content = "HELLO WORLD";
+
+		NettyContext c = HttpServer.create(opts -> opts.compression(true).port(0))
+		          .newHandler((req, res) -> res.sendString(Mono.just(content)))
+		          .block();
+
+
 		//verify gzip is negotiated (when no decoder)
 		StepVerifier.create(
-				HttpClient.create()
-				          .get("http://www.httpwatch.com", req -> req
+				HttpClient.create(c.address().getPort())
+				          .get("/", req -> req
 						          .followRedirect()
 						          .addHeader("Accept-Encoding", "gzip")
 						          .addHeader("Accept-Encoding", "deflate")
 				          )
-				          .flatMap(r -> r.receive().asString()
-				                         .elementAt(0)
-				                         .map(s -> s.substring(0, Math.min(s.length() -1, 100)))
+				          .flatMap(r -> r.receive().aggregate().asString()
 				                         .zipWith(Mono.just(r.responseHeaders().get("Content-Encoding", "")))
 				                         .zipWith(Mono.just(r)))
 		)
 		            .expectNextMatches(tuple -> {
-		                               tuple.getT2().dispose();
-		                               String content = tuple.getT1().getT1();
-		                               return !content.contains("<html>") && !content.contains("<head>")
+		                               return !tuple.getT1().getT1().equals(content)
 		                                      && "gzip".equals(tuple.getT1().getT2());
 		                               })
 		            .expectComplete()
@@ -573,26 +594,25 @@ public class HttpClientTest {
 
 		//verify decoder does its job and removes the header
 		StepVerifier.create(
-				HttpClient.create()
-				          .get("http://www.httpwatch.com", req -> {
+				HttpClient.create(c.address().getPort())
+				          .get("/", req -> {
 					          req.context().addHandlerFirst("gzipDecompressor", new HttpContentDecompressor());
 					          return req.followRedirect()
 					                    .addHeader("Accept-Encoding", "gzip")
 					                    .addHeader("Accept-Encoding", "deflate");
 				          })
-				          .flatMap(r -> r.receive().asString().elementAt(0)
-				                         .map(s -> s.substring(0, Math.min(s.length() -1, 100)))
+				          .flatMap(r -> r.receive().aggregate().asString()
 				                         .zipWith(Mono.just(r.responseHeaders().get("Content-Encoding", "")))
 				                         .zipWith(Mono.just(r)))
 		)
 		            .expectNextMatches(tuple -> {
-		                               tuple.getT2().dispose();
-		                               String content = tuple.getT1().getT1();
-		                               return content.contains("<html>") && content.contains("<head>")
+		                               return tuple.getT1().getT1().equals(content)
 		                                      && "".equals(tuple.getT1().getT2());
 		                               })
 		            .expectComplete()
 		            .verify();
+
+		c.dispose();
 	}
 
 	@Test
@@ -743,7 +763,7 @@ public class HttpClientTest {
 				HttpClient.create(opt -> applyHostAndPortFromContext(opt, context)
 				                            .sslContext(sslClient))
 				          .post("/upload", r -> r.sendFile(largeFile))
-				          .block(Duration.ofSeconds(120));
+				          .block(Duration.ofSeconds(30));
 
 		context.dispose();
 		context.onClose().block();
@@ -777,7 +797,7 @@ public class HttpClientTest {
 		HttpClientResponse response =
 				createHttpClientForContext(context)
 				          .post("/upload", r -> r.sendFile(largeFile))
-				          .block(Duration.ofSeconds(120));
+				          .block(Duration.ofSeconds(30));
 
 		context.dispose();
 		context.onClose().block();
@@ -868,5 +888,26 @@ public class HttpClientTest {
 	private HttpClientOptions.Builder applyHostAndPortFromContext(HttpClientOptions.Builder httpClientOptions, NettyContext context) {
 		httpClientOptions.connectAddress(() -> context.address());
 		return httpClientOptions;
+	}
+
+	@Test
+	public void testIssue303() {
+		NettyContext server =
+				HttpServer.create(0)
+				          .newHandler((req, resp) -> resp.sendString(Mono.just("OK")))
+				          .block(Duration.ofSeconds(30));
+
+		Mono<String> content =
+				HttpClient.create(server.address().getPort())
+				          .get("/", req ->
+				                  req.sendByteArray(Mono.defer(() -> Mono.just("Hello".getBytes(Charset.defaultCharset())))))
+				          .flatMap(it -> it.receive().aggregate().asString());
+
+		StepVerifier.create(content)
+		            .expectNextMatches(s -> "OK".equals(s))
+		            .expectComplete()
+		            .verify(Duration.ofSeconds(30));
+
+		server.dispose();
 	}
 }

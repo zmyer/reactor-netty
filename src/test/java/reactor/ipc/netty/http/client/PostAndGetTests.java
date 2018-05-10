@@ -35,6 +35,7 @@ import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.http.server.HttpServer;
 import reactor.ipc.netty.http.server.HttpServerRequest;
 import reactor.ipc.netty.http.server.HttpServerResponse;
+import reactor.util.Logger;
 import reactor.util.Loggers;
 
 /**
@@ -43,6 +44,8 @@ import reactor.util.Loggers;
  */
 @Ignore
 public class PostAndGetTests {
+
+	static final Logger log = Loggers.getLogger(PostAndGetTests.class);
 
 	private NettyContext httpServer;
 
@@ -130,16 +133,16 @@ public class PostAndGetTests {
 					java.nio.channels.SocketChannel.open(address);
 			System.out.println(String.format("get: request >> [%s]", request.toString()));
 			channel.write(ByteBuffer.wrap(request.toString()
-			                                     .getBytes()));
+			                                     .getBytes(Charset.defaultCharset())));
 			ByteBuffer buf = ByteBuffer.allocate(4 * 1024);
 			while (channel.read(buf) > -1) {
 			}
-			String response = new String(buf.array());
+			String response = new String(buf.array(), Charset.defaultCharset());
 			System.out.println(String.format("get: << Response: %s", response));
 			channel.close();
 		}
 		catch (IOException e) {
-			e.printStackTrace();
+			log.error("", e);
 		}
 	}
 
@@ -158,17 +161,16 @@ public class PostAndGetTests {
 			System.out.println(String.format("post: request >> [%s]",
 					request.toString()));
 			channel.write(ByteBuffer.wrap(request.toString()
-			                                     .getBytes()));
+			                                     .getBytes(Charset.defaultCharset())));
 			ByteBuffer buf = ByteBuffer.allocate(4 * 1024);
 			while (channel.read(buf) > -1) {
 			}
-			String response = new String(buf.array());
-			Loggers.getLogger(PostAndGetTests.class)
-			       .info("post: << " + "Response: %s", response);
+			String response = new String(buf.array(), Charset.defaultCharset());
+			log.info("post: << " + "Response: %s", response);
 			channel.close();
 		}
 		catch (IOException e) {
-			e.printStackTrace();
+			log.error("", e);
 		}
 	}
 }

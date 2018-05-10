@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -42,7 +43,6 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
@@ -55,6 +55,7 @@ import reactor.core.publisher.Mono;
 import reactor.ipc.netty.FutureMono;
 import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyOutbound;
+import reactor.ipc.netty.NettyPipeline;
 import reactor.ipc.netty.channel.ChannelOperations;
 import reactor.ipc.netty.channel.ContextHandler;
 import reactor.ipc.netty.http.Cookies;
@@ -78,14 +79,17 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	static HttpServerOperations bindHttp(Channel channel,
 			BiFunction<? super HttpServerRequest, ? super HttpServerResponse, ? extends Publisher<Void>> handler,
 			ContextHandler<?> context,
+			BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate,
 			Object msg) {
-		return new HttpServerOperations(channel, handler, context, (HttpRequest) msg);
+		return new HttpServerOperations(channel, handler, context, compressionPredicate,(HttpRequest) msg);
 	}
 
 	final HttpResponse nettyResponse;
 	final HttpHeaders  responseHeaders;
 	final Cookies     cookieHolder;
 	final HttpRequest nettyRequest;
+
+	final BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate;
 
 	Function<? super String, Map<String, String>> paramsResolver;
 
@@ -96,16 +100,19 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		this.nettyResponse = replaced.nettyResponse;
 		this.paramsResolver = replaced.paramsResolver;
 		this.nettyRequest = replaced.nettyRequest;
+		this.compressionPredicate = replaced.compressionPredicate;
 	}
 
 	HttpServerOperations(Channel ch,
 			BiFunction<? super HttpServerRequest, ? super HttpServerResponse, ? extends Publisher<Void>> handler,
 			ContextHandler<?> context,
+			BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate,
 			HttpRequest nettyRequest) {
 		super(ch, handler, context);
 		this.nettyRequest = Objects.requireNonNull(nettyRequest, "nettyRequest");
 		this.nettyResponse = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
 		this.responseHeaders = nettyResponse.headers();
+		this.compressionPredicate = compressionPredicate;
 		this.cookieHolder = Cookies.newServerRequestHolder(requestHeaders());
 		chunkedTransfer(true);
 
@@ -131,6 +138,7 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		else {
 			res.headers().set(responseHeaders);
 		}
+		markPersistent(true);
 		return res;
 	}
 
@@ -157,13 +165,12 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		return this;
 	}
 
+	@Override
 	public HttpServerResponse chunkedTransfer(boolean chunked) {
 		if (!hasSentHeaders() && HttpUtil.isTransferEncodingChunked(nettyResponse) != chunked) {
 			responseHeaders.remove(HttpHeaderNames.TRANSFER_ENCODING);
 			HttpUtil.setTransferEncodingChunked(nettyResponse, chunked);
 		}
-
-		markPersistent(chunked);
 		return this;
 	}
 
@@ -250,7 +257,13 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		//       No need to notify the upstream handlers - just log.
 		//       If decoding a response, just throw an error.
 		if (HttpUtil.is100ContinueExpected(nettyRequest)) {
-			return FutureMono.deferFuture(() -> channel().writeAndFlush(CONTINUE))
+			return FutureMono.deferFuture(() -> {
+						if(!hasSentHeaders()) {
+							return channel().writeAndFlush(CONTINUE);
+						}
+						return channel().newSucceededFuture();
+					})
+
 			                 .thenMany(super.receiveObject());
 		}
 		else {
@@ -358,6 +371,29 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	}
 
 	@Override
+	public HttpServerResponse compression(boolean compress) {
+		if (!compress) {
+			removeHandler(NettyPipeline.CompressionHandler);
+		}
+		else if (channel().pipeline()
+		                  .get(NettyPipeline.CompressionHandler) == null) {
+			SimpleCompressionHandler handler = new SimpleCompressionHandler();
+
+			try {
+				handler.channelRead(channel().pipeline()
+				                             .context(NettyPipeline.ReactiveBridge),
+						nettyRequest);
+
+				addHandlerFirst(NettyPipeline.CompressionHandler, handler);
+			}
+			catch (Throwable e) {
+				log.error("", e);
+			}
+		}
+		return this;
+	}
+
+	@Override
 	protected void onHandlerStart() {
 		applyHandler();
 	}
@@ -378,6 +414,17 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		}
 		else {
 			super.onInboundNext(ctx, msg);
+		}
+	}
+
+	@Override
+	protected void preSendHeadersAndStatus(){
+		if (!HttpUtil.isTransferEncodingChunked(nettyResponse) && !HttpUtil.isContentLengthSet(
+				nettyResponse)) {
+			markPersistent(false);
+		}
+		if (compressionPredicate != null && compressionPredicate.test(this, this)) {
+			compression(true);
 		}
 	}
 
@@ -432,7 +479,6 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 			return;
 		}
 
-		discreteRemoteClose(err);
 		if (markSentHeaders()) {
 			log.error("Error starting response. Replying error status", err);
 

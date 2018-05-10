@@ -20,45 +20,26 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.HttpContentCompressor;
-import io.netty.handler.codec.http.LastHttpContent;
 
 /**
- * @author mostroverkhov
+ * @author Stephane Maldini
  */
-final class FilteringHttpContentCompressor extends HttpContentCompressor {
-
-	FilteringHttpContentCompressor() {
-	}
+public class SimpleCompressionHandler extends HttpContentCompressor {
 
 	@Override
 	public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
 			throws Exception {
-		if (msg instanceof FilterMessage) {
-			FilterMessage filterMsg = (FilterMessage) msg;
-			ctx.write(filterMsg.unwrap(), promise);
+
+		if (msg instanceof ByteBuf) {
+			super.write(ctx, new DefaultHttpContent((ByteBuf)msg), promise);
 		}
 		else {
-			if (msg instanceof ByteBuf) {
-				msg = new DefaultHttpContent((ByteBuf) msg);
-			}
 			super.write(ctx, msg, promise);
 		}
 	}
 
-	static final class FilterMessage {
-
-		private final Object message;
-
-		static FilterMessage wrap(Object msg) {
-			return new FilterMessage(msg);
-		}
-
-		FilterMessage(Object message) {
-			this.message = message;
-		}
-
-		Object unwrap() {
-			return message;
-		}
+	@Override
+	public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+		super.handlerAdded(ctx);
 	}
 }

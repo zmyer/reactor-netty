@@ -25,6 +25,8 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufHolder;
@@ -52,6 +54,7 @@ import reactor.ipc.netty.NettyPipeline;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 import reactor.util.concurrent.Queues;
+import reactor.util.context.Context;
 
 /**
  * Netty {@link io.netty.channel.ChannelDuplexHandler} implementation that bridge data
@@ -98,12 +101,12 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	public void channelActive(ChannelHandlerContext ctx) throws Exception {
+	public void channelActive(ChannelHandlerContext ctx) {
 		originContext.createOperations(ctx.channel(), null);
 	}
 
 	@Override
-	final public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+	final public void channelInactive(ChannelHandlerContext ctx) {
 		try {
 			ChannelOperations<?, ?> ops = ChannelOperations.get(ctx.channel());
 			if (ops != null) {
@@ -123,8 +126,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	final public void channelRead(ChannelHandlerContext ctx, Object msg)
-			throws Exception {
+	final public void channelRead(ChannelHandlerContext ctx, Object msg) {
 		if (msg == null || msg == Unpooled.EMPTY_BUFFER || msg instanceof EmptyByteBuf) {
 			return;
 		}
@@ -160,7 +162,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+	public void channelWritabilityChanged(ChannelHandlerContext ctx) {
 		if (log.isDebugEnabled()) {
 			log.debug("{} Write state change {}",
 					ctx.channel(),
@@ -171,8 +173,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	final public void exceptionCaught(ChannelHandlerContext ctx, Throwable err)
-			throws Exception {
+	final public void exceptionCaught(ChannelHandlerContext ctx, Throwable err) {
 		Exceptions.throwIfJvmFatal(err);
 		ChannelOperations<?, ?> ops = ChannelOperations.get(ctx.channel());
 		if (ops != null) {
@@ -187,19 +188,19 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	public void flush(ChannelHandlerContext ctx) throws Exception {
+	public void flush(ChannelHandlerContext ctx) {
 		drain();
 	}
 
 	@Override
-	public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+	public void handlerAdded(ChannelHandlerContext ctx) {
 		this.ctx = ctx;
 		this.unsafe = ctx.channel().unsafe();
 		inner.request(prefetch);
 	}
 
 	@Override
-	public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+	public void handlerRemoved(ChannelHandlerContext ctx) {
 		if (!removed) {
 			removed = true;
 
@@ -209,8 +210,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	final public void userEventTriggered(ChannelHandlerContext ctx, Object evt)
-			throws Exception {
+	final public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
 		if (log.isTraceEnabled()) {
 			log.trace("{} End of the pipeline, User event {}", ctx.channel(), evt);
 		}
@@ -243,8 +243,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 	@Override
 	@SuppressWarnings("unchecked")
-	public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
-			throws Exception {
+	public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
 		if (log.isDebugEnabled()) {
 			log.debug("{} Writing object {}", ctx.channel(), msg);
 		}
@@ -274,15 +273,15 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	public void operationComplete(ChannelFuture future) throws Exception {
-		if (future.isSuccess() && innerActive) {
+	public void operationComplete(ChannelFuture future) {
+		if (future.isSuccess()) {
 			inner.request(1L);
 		}
 	}
 
 	ChannelFuture doWrite(Object msg, ChannelPromise promise, PublisherSender inner) {
 		if (flushOnEach || //fastpath
-				inner == null && pendingWrites.isEmpty() || //last drained element
+				(inner == null && pendingWrites.isEmpty()) || //last drained element
 				!ctx.channel()
 				    .isWritable() //force flush if write buffer full
 				) {
@@ -477,7 +476,8 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	static final class PublisherSender
-			implements CoreSubscriber<Object>, Subscription, ChannelFutureListener {
+			implements CoreSubscriber<Object>, Subscription, ChannelFutureListener,
+			           Consumer<ChannelFuture> {
 
 		final ChannelOperationsHandler parent;
 
@@ -506,7 +506,27 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 
 		@Override
+		public void accept(ChannelFuture cf) {
+			//current subscription stop
+			if (promise == cf &&
+					MISSED_SUBSCRIPTION.compareAndSet(this, null, Operators.cancelledSubscription())) {
+				drain();
+			}
+		}
+
+		@Override
+		@SuppressWarnings("unchecked")
+		public Context currentContext() {
+			ChannelPromise p = promise;
+			if (p instanceof Function) {
+				return ((Function<?, Context>)p).apply(null);
+			}
+			return Context.empty();
+		}
+
+		@Override
 		public final void cancel() {
+			//full stop
 			if (!inactive) {
 				inactive = true;
 
@@ -525,9 +545,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			parent.innerActive = false;
 
 			if (p != 0L) {
-				produced = 0L;
-				produced(p);
-				if (parent.pendingBytes > 0L || parent.hasPendingWriteBytes()) {
+				if (parent.pendingBytes > 0L || parent.hasPendingWriteBytes() || !lastThreadInEventLoop) {
 					if (parent.ctx.channel()
 					              .isActive()) {
 						parent.pendingBytes = 0L;
@@ -548,7 +566,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 
 			if (f != null) {
-				if (!f.isDone() && parent.hasPendingWriteBytes()) {
+				if (!f.isDone() && (parent.hasPendingWriteBytes() || !lastThreadInEventLoop)) {
 					EventLoop eventLoop = parent.ctx.channel().eventLoop();
 					if (eventLoop.inEventLoop()) {
 						parent.pendingWriteOffer.test(f, PENDING_WRITES);
@@ -560,6 +578,8 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				f.addListener(this);
 			}
 			else {
+				produced = 0L;
+				produced(p);
 				promise.setSuccess();
 				parent.drain();
 			}
@@ -572,8 +592,6 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			parent.innerActive = false;
 
 			if (p != 0L) {
-				produced = 0L;
-				produced(p);
 				if (parent.ctx.channel()
 				              .isActive()) {
 					if (lastThreadInEventLoop) {
@@ -592,7 +610,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 
 			if (f != null) {
-				if (!f.isDone() && parent.hasPendingWriteBytes()) {
+				if (!f.isDone() && (parent.hasPendingWriteBytes() || !lastThreadInEventLoop)) {
 					EventLoop eventLoop = parent.ctx.channel().eventLoop();
 					if (eventLoop.inEventLoop()) {
 						parent.pendingWriteOffer.test(f, PENDING_WRITES);
@@ -602,6 +620,8 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					}
 				}
 				f.addListener(future -> {
+					produced = 0L;
+					produced(p);
 					if (!future.isSuccess()) {
 						promise.setFailure(Exceptions.addSuppressed(future.cause(), t));
 						return;
@@ -610,6 +630,8 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				});
 			}
 			else {
+				produced = 0L;
+				produced(p);
 				promise.setFailure(t);
 				parent.drain();
 			}
@@ -639,9 +661,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 			if (parent.ctx.channel()
 			              .isWritable()) {
-				if (parent.innerActive) {
-					request(1L);
-				}
+				request(1L);
 			}
 			else {
 				promise.addListener(parent);
@@ -678,7 +698,10 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 
 		@Override
-		public void operationComplete(ChannelFuture future) throws Exception {
+		public void operationComplete(ChannelFuture future) {
+			long p = produced;
+			produced = 0L;
+			produced(p);
 			if (future.isSuccess()) {
 				promise.setSuccess();
 			}
@@ -741,6 +764,16 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 				if (ms != null) {
 					ms = MISSED_SUBSCRIPTION.getAndSet(this, null);
+
+					if (ms == Operators.cancelledSubscription()) {
+						parent.innerActive = false;
+						Subscription a = actual;
+						if (a != null) {
+							a.cancel();
+							actual = null;
+							promise = parent.ctx.voidPromise();
+						}
+					}
 				}
 
 				long mr = missedRequested;
@@ -759,6 +792,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					if (a != null) {
 						a.cancel();
 						actual = null;
+						promise = parent.ctx.voidPromise();
 					}
 					if (ms != null) {
 						ms.cancel();

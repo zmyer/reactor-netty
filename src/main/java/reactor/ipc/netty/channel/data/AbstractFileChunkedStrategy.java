@@ -16,15 +16,15 @@
 
 package reactor.ipc.netty.channel.data;
 
-import java.io.RandomAccessFile;
-
 import io.netty.handler.stream.ChunkedWriteHandler;
 import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyPipeline;
 
+import java.nio.channels.FileChannel;
+
 /**
  * A base abstract implementation of a {@link FileChunkedStrategy}. Only the
- * {@link #chunkFile(FileChannel)} method needs to be implemented, but child classes
+ * {@link #chunkFile(FileChannel, long, long, int)} method needs to be implemented, but child classes
  * can also override {@link #afterWrite(NettyContext)} to add custom cleanup.
  * The pipeline preparation and cleanup involves adding and removing the
  * {@link NettyPipeline#ChunkedWriter} handler if it was not already present. It will be
@@ -34,8 +34,6 @@ import reactor.ipc.netty.NettyPipeline;
  * @author Simon Baslé
  */
 public abstract class AbstractFileChunkedStrategy<T> implements FileChunkedStrategy<T> {
-
-	boolean addHandler;
 
 	/**
 	 * {@inheritDoc}
@@ -49,10 +47,7 @@ public abstract class AbstractFileChunkedStrategy<T> implements FileChunkedStrat
 	 */
 	@Override
 	public final void preparePipeline(NettyContext context) {
-		this.addHandler = context.channel()
-		                         .pipeline()
-		                         .get(NettyPipeline.ChunkedWriter) == null;
-		if (addHandler) {
+		if (!hasChunkedWriter(context)) {
 			boolean hasReactiveBridge = context.channel()
 			                                   .pipeline()
 			                                   .get(NettyPipeline.ReactiveBridge) != null;
@@ -72,6 +67,12 @@ public abstract class AbstractFileChunkedStrategy<T> implements FileChunkedStrat
 		}
 	}
 
+	private boolean hasChunkedWriter(NettyContext context) {
+		return context.channel()
+		              .pipeline()
+		              .get(NettyPipeline.ChunkedWriter) != null;
+	}
+
 	/**
 	 * {@inheritDoc}
 	 * <p>
@@ -82,7 +83,7 @@ public abstract class AbstractFileChunkedStrategy<T> implements FileChunkedStrat
 	 */
 	@Override
 	public final void cleanupPipeline(NettyContext context) {
-		if (addHandler) {
+		if (hasChunkedWriter(context)) {
 			context.channel()
 			       .pipeline()
 			       .remove(NettyPipeline.ChunkedWriter);

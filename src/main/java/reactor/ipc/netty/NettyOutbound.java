@@ -32,6 +32,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.DefaultFileRegion;
+import io.netty.channel.nio.NioEventLoop;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.stream.ChunkedInput;
 import io.netty.handler.stream.ChunkedNioFile;
@@ -51,10 +52,9 @@ public interface NettyOutbound extends Publisher<Void> {
 	FileChunkedStrategy<ByteBuf> FILE_CHUNKED_STRATEGY_BUFFER = new AbstractFileChunkedStrategy<ByteBuf>() {
 
 		@Override
-		public ChunkedInput<ByteBuf> chunkFile(FileChannel fileChannel) {
+		public ChunkedInput<ByteBuf> chunkFile(FileChannel fileChannel, long offset, long length, int chunkSize) {
 			try {
-				//TODO tune the chunk size
-				return new ChunkedNioFile(fileChannel, 1024);
+				return new ChunkedNioFile(fileChannel, offset, length, chunkSize);
 			}
 			catch (IOException e) {
 				throw Exceptions.propagate(e);
@@ -94,7 +94,7 @@ public interface NettyOutbound extends Publisher<Void> {
 		return this;
 	}
 
-	default FileChunkedStrategy getFileChunkedStrategy() {
+	default FileChunkedStrategy<?> getFileChunkedStrategy() {
 		return FILE_CHUNKED_STRATEGY_BUFFER;
 	}
 
@@ -167,8 +167,7 @@ public interface NettyOutbound extends Publisher<Void> {
 	 * error during write
 	 */
 	default NettyOutbound sendByteArray(Publisher<? extends byte[]> dataStream) {
-		return send(Flux.from(dataStream)
-		                .map(Unpooled::wrappedBuffer));
+		return send(ReactorNetty.publisherOrScalarMap(dataStream, Unpooled::wrappedBuffer));
 	}
 
 	/**
@@ -224,7 +223,10 @@ public interface NettyOutbound extends Publisher<Void> {
 	 */
 	default NettyOutbound sendFile(Path file, long position, long count) {
 		Objects.requireNonNull(file);
-		if (context().channel().pipeline().get(SslHandler.class) != null) {
+		if ((context().channel().pipeline().get(SslHandler.class) != null) ||
+				context().channel().pipeline().get(NettyPipeline.CompressionHandler) != null ||
+				(!(context().channel().eventLoop() instanceof NioEventLoop) &&
+						!"file".equals(file.toUri().getScheme()))) {
 			return sendFileChunked(file, position, count);
 		}
 
@@ -240,16 +242,14 @@ public interface NettyOutbound extends Publisher<Void> {
 
 	default NettyOutbound sendFileChunked(Path file, long position, long count) {
 		Objects.requireNonNull(file);
-		final FileChunkedStrategy strategy = getFileChunkedStrategy();
-		final boolean needChunkedWriteHandler = context().channel().pipeline().get(NettyPipeline.ChunkedWriter) == null;
-		if (needChunkedWriteHandler) {
-			strategy.preparePipeline(context());
-		}
+		final FileChunkedStrategy<?> strategy = getFileChunkedStrategy();
+		strategy.preparePipeline(context());
 
 		return then(Mono.using(() -> FileChannel.open(file, StandardOpenOption.READ),
 				fc -> {
 						try {
-							ChunkedInput<?> message = strategy.chunkFile(fc);
+							// TODO: tune the chunk size
+							ChunkedInput<?> message = strategy.chunkFile(fc, position, count, 1024);
 							return FutureMono.from(context().channel().writeAndFlush(message));
 						}
 						catch (Exception e) {
@@ -294,10 +294,7 @@ public interface NettyOutbound extends Publisher<Void> {
 	 * error during write
 	 */
 	default NettyOutbound sendObject(Publisher<?> dataStream) {
-		return then(FutureMono.deferFutureWithContext((subscriberContext) ->
-				context().channel()
-				         .writeAndFlush(PublisherContext.withContext(dataStream, subscriberContext)))
-		);
+		return then(FutureMono.disposableWriteAndFlush(context().channel(), dataStream));
 	}
 
 	/**
@@ -341,10 +338,9 @@ public interface NettyOutbound extends Publisher<Void> {
 	 */
 	default NettyOutbound sendString(Publisher<? extends String> dataStream,
 			Charset charset) {
-		return sendObject(Flux.from(dataStream)
-		                      .map(s -> alloc()
-		                                   .buffer()
-		                                   .writeBytes(s.getBytes(charset))));
+		return sendObject(ReactorNetty.publisherOrScalarMap(dataStream, s -> alloc()
+				.buffer()
+				.writeBytes(s.getBytes(charset))));
 	}
 
 	/**

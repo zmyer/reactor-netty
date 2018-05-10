@@ -22,13 +22,11 @@ buildscript {
   dependencies {
 	classpath 'org.springframework.build.gradle:propdeps-plugin:0.0.7',
 			'io.spring.gradle:spring-io-plugin:0.0.4.RELEASE',
-			'com.github.jengelman.gradle.plugins:shadow:1.2.0',
-			'org.asciidoctor:asciidoctorj-pdf:1.5.0-alpha.8'
+			'com.github.jengelman.gradle.plugins:shadow:1.2.0'
   }
 }
 
 plugins {
-  id 'org.asciidoctor.convert' version '1.5.2'
   id "com.github.hierynomus.license" version "0.14.0"
 }
 
@@ -48,7 +46,7 @@ ext {
   gradleVersion = '3.3'
   gradleScriptDir = "${rootProject.projectDir}/gradle"
 
-  reactorCoreVersion = "3.1.4.RELEASE"
+  reactorCoreVersion = "3.1.7.RELEASE"
 
   // Languages
   groovyVersion = '2.4.1'
@@ -60,7 +58,7 @@ ext {
   assertJVersion = '3.6.1'
 
   // Libraries
-  nettyVersion = '4.1.22.Final'
+  nettyVersion = '4.1.24.Final'
   jacksonDatabindVersion = '2.5.1'
 
   // Testing
@@ -85,6 +83,7 @@ configure(rootProject) { project ->
   apply plugin: 'propdeps'
   apply plugin: 'osgi'
   apply from: "${gradleScriptDir}/ide.gradle"
+  apply from: "${gradleScriptDir}/errorprone.gradle"
 
   jacoco {
 	toolVersion = '0.7.7.201606060606'
@@ -118,7 +117,7 @@ configure(rootProject) { project ->
 														   "-Xlint:-serial",      // intentionally disabled
 														   "-Xlint:-options",     // intentionally disabled
 														   "-Xlint:-fallthrough", // intentionally disabled
-														   "-Xlint:-rawtypes"     // TODO enable and fix warnings
+														   "-Xlint:rawtypes"
   ]
 
   compileJava {
@@ -213,7 +212,7 @@ configure(rootProject) { project ->
 	compile "io.netty:netty-handler:${nettyVersion}"
 	compile "io.netty:netty-handler-proxy:${nettyVersion}"
 	compile "io.netty:netty-codec-http:${nettyVersion}"
-	compile "io.netty:netty-transport-native-epoll:${nettyVersion}"
+	compile "io.netty:netty-transport-native-epoll:${nettyVersion}:linux-x86_64"
 	optional "io.netty:netty-transport-native-kqueue:${nettyVersion}"
 
 	// Testing

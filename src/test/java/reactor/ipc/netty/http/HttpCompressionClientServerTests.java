@@ -17,12 +17,14 @@ package reactor.ipc.netty.http;
 
 import java.io.ByteArrayInputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.Charset;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
 
 import io.netty.handler.codec.http.HttpHeaders;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -36,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * @author mostroverkhov
+ * @author smaldini
  */
 public class HttpCompressionClientServerTests {
 
@@ -47,7 +50,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		HttpClient client = HttpClient.create(o -> o.compression(true)
 		                                            .connectAddress(() -> address(nettyContext)));
@@ -71,7 +74,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
 		HttpClientResponse resp =
@@ -98,7 +101,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		//don't activate compression on the client options to avoid auto-handling (which removes the header)
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
@@ -127,7 +130,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		//don't activate compression on the client options to avoid auto-handling (which removes the header)
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
@@ -143,7 +146,7 @@ public class HttpCompressionClientServerTests {
 		                         .asByteArray()
 		                         .block();
 
-		assertThat(new String(replyBuffer)).isNotEqualTo("reply");
+		assertThat(new String(replyBuffer, Charset.defaultCharset())).isNotEqualTo("reply");
 
 		GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(replyBuffer));
 		byte deflatedBuf[] = new byte[1024];
@@ -152,7 +155,83 @@ public class HttpCompressionClientServerTests {
 
 		assertThat(readable).isGreaterThan(0);
 
-		String deflated = new String(deflatedBuf, 0, readable);
+		String deflated = new String(deflatedBuf, 0, readable, Charset.defaultCharset());
+
+		assertThat(deflated).isEqualTo("reply");
+
+		nettyContext.dispose();
+		nettyContext.onClose()
+		            .block();
+	}
+
+
+
+	@Test
+	public void serverCompressionEnabledSmallResponse() throws Exception {
+		HttpServer server = HttpServer.create(o -> o.port(0)
+		                                            .compression(25));
+
+		NettyContext nettyContext =
+				server.newHandler((in, out) -> out.header("content-length", "5")
+				                                  .sendString(Mono.just("reply")))
+				      .block(Duration.ofSeconds(10));
+
+		//don't activate compression on the client options to avoid auto-handling (which removes the header)
+		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
+		HttpClientResponse resp =
+				//edit the header manually to attempt to trigger compression on server side
+				client.get("/test", req -> req.header("Accept-Encoding", "gzip"))
+				      .block();
+
+		//check the server didn't send the gzip header, only transfer-encoding
+		HttpHeaders headers = resp.responseHeaders();
+		assertThat(headers.get("conTENT-encoding")).isNull();
+
+		//check the server sent plain text
+		String reply = resp.receive()
+		                   .asString()
+		                   .blockFirst();
+		Assert.assertEquals("reply", reply);
+
+		resp.dispose();
+		nettyContext.dispose();
+		nettyContext.onClose()
+		            .block();
+	}
+
+	@Test
+	public void serverCompressionPredicateTrue() throws Exception {
+		HttpServer server = HttpServer.create(o -> o.port(0)
+		                                            .compression((req, res) -> true));
+
+		NettyContext nettyContext =
+				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
+				      .block(Duration.ofSeconds(10));
+
+		//don't activate compression on the client options to avoid auto-handling (which removes the header)
+		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
+		HttpClientResponse resp =
+				//edit the header manually to attempt to trigger compression on server side
+				client.get("/test", req -> req.header("Accept-Encoding", "gzip"))
+				      .block();
+
+		assertThat(resp.responseHeaders().get("content-encoding")).isEqualTo("gzip");
+
+		byte[] replyBuffer = resp.receive()
+		                         .aggregate()
+		                         .asByteArray()
+		                         .block();
+
+		assertThat(new String(replyBuffer, Charset.defaultCharset())).isNotEqualTo("reply");
+
+		GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(replyBuffer));
+		byte deflatedBuf[] = new byte[1024];
+		int readable = gis.read(deflatedBuf);
+		gis.close();
+
+		assertThat(readable).isGreaterThan(0);
+
+		String deflated = new String(deflatedBuf, 0, readable, Charset.defaultCharset());
 
 		assertThat(deflated).isEqualTo("reply");
 
@@ -162,13 +241,13 @@ public class HttpCompressionClientServerTests {
 	}
 
 	@Test
-	public void serverCompressionEnabledSmallResponse() throws Exception {
+	public void serverCompressionPredicateFalse() throws Exception {
 		HttpServer server = HttpServer.create(o -> o.port(0)
-		                                            .compression(25));
+		                                            .compression((req, res) -> false));
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		//don't activate compression on the client options to avoid auto-handling (which removes the header)
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
@@ -201,7 +280,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		//don't activate compression on the client options to avoid auto-handling (which removes the header)
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
@@ -217,7 +296,7 @@ public class HttpCompressionClientServerTests {
 		                         .asByteArray()
 		                         .block();
 
-		assertThat(new String(replyBuffer)).isNotEqualTo("reply");
+		assertThat(new String(replyBuffer, Charset.defaultCharset())).isNotEqualTo("reply");
 
 		GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(replyBuffer));
 		byte deflatedBuf[] = new byte[1024];
@@ -226,7 +305,7 @@ public class HttpCompressionClientServerTests {
 
 		assertThat(readable).isGreaterThan(0);
 
-		String deflated = new String(deflatedBuf, 0, readable);
+		String deflated = new String(deflatedBuf, 0, readable, Charset.defaultCharset());
 
 		assertThat(deflated).isEqualTo("reply");
 
@@ -243,7 +322,7 @@ public class HttpCompressionClientServerTests {
 		String serverReply = "reply";
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just(serverReply)))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		HttpClient client = HttpClient.create(o -> o.compression(false)
 		                                            .connectAddress(() -> address(nettyContext)));
@@ -270,7 +349,7 @@ public class HttpCompressionClientServerTests {
 
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 
 		HttpClient client = HttpClient.create(o -> o.connectAddress(() -> address(nettyContext)));
 
@@ -297,7 +376,7 @@ public class HttpCompressionClientServerTests {
 		HttpServer server = HttpServer.create(o -> o.port(0).compression(true));
 		NettyContext nettyContext =
 				server.newHandler((in, out) -> out.sendString(Mono.just("reply")))
-				      .block(Duration.ofMillis(10_000));
+				      .block(Duration.ofSeconds(10));
 		HttpClient client = HttpClient.create(opt -> opt.compression(true)
 		                                                .connectAddress(() -> address(nettyContext)));
 
@@ -335,7 +414,7 @@ public class HttpCompressionClientServerTests {
 		StepVerifier.create(response)
 		            .expectNextMatches(s -> "testtesttesttesttest".equals(s))
 		            .expectComplete()
-		            .verify(Duration.ofSeconds(30));
+		            .verify();
 
 		server.dispose();
 	}
@@ -358,7 +437,7 @@ public class HttpCompressionClientServerTests {
 		StepVerifier.create(response)
 		            .expectNextMatches(s -> "testtesttesttest".equals(s))
 		            .expectComplete()
-		            .verify(Duration.ofSeconds(30));
+		            .verify();
 
 		response = HttpClient.create(options -> options.port(server.address().getPort())
 		                                               .compression(true))
@@ -368,7 +447,7 @@ public class HttpCompressionClientServerTests {
 		StepVerifier.create(response)
 		            .expectNextMatches(s -> "testtesttesttest".equals(s))
 		            .expectComplete()
-		            .verify(Duration.ofSeconds(30));
+		            .verify();
 
 		server.dispose();
 	}

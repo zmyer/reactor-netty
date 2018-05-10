@@ -67,6 +67,7 @@ import reactor.ipc.netty.FutureMono;
 import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyOutbound;
 import reactor.ipc.netty.NettyPipeline;
+import reactor.ipc.netty.channel.ChannelOperations;
 import reactor.ipc.netty.channel.ContextHandler;
 import reactor.ipc.netty.http.Cookies;
 import reactor.ipc.netty.http.HttpOperations;
@@ -82,7 +83,7 @@ import reactor.util.Loggers;
 class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClientRequest>
 		implements HttpClientResponse, HttpClientRequest {
 
-	static HttpOperations bindHttp(Channel channel,
+	static HttpClientOperations bindHttp(Channel channel,
 			BiFunction<? super HttpClientResponse, ? super HttpClientRequest, ? extends Publisher<Void>> handler,
 			ContextHandler<?> context) {
 		return new HttpClientOperations(channel, handler, context);
@@ -272,6 +273,17 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 	}
 
 	@Override
+	public NettyOutbound sendObject(Publisher<?> dataStream) {
+		if (!HttpUtil.isTransferEncodingChunked(nettyRequest) &&
+				!HttpUtil.isContentLengthSet(nettyRequest) &&
+				!method().equals(HttpMethod.HEAD) &&
+				!hasSentHeaders()) {
+			HttpUtil.setTransferEncodingChunked(nettyRequest, true);
+		}
+		return super.sendObject(dataStream);
+	}
+
+	@Override
 	public HttpClientRequest header(CharSequence name, CharSequence value) {
 		if (!hasSentHeaders()) {
 			this.requestHeaders.set(name, value);
@@ -311,8 +323,8 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 
 	@Override
 	public boolean isWebsocket() {
-		return get(channel()).getClass()
-		                     .equals(HttpClientWSOperations.class);
+		ChannelOperations<?, ?> ops = get(channel());
+		return ops != null && ops.getClass().equals(HttpClientWSOperations.class);
 	}
 
 	@Override
@@ -345,6 +357,7 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 		return nettyRequest.headers();
 	}
 
+	@Override
 	public HttpHeaders responseHeaders() {
 		ResponseState responseState = this.responseState;
 		if (responseState != null) {
@@ -368,7 +381,7 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 
 	@Override
 	public NettyOutbound send(Publisher<? extends ByteBuf> source) {
-		if (method() == HttpMethod.GET || method() == HttpMethod.HEAD) {
+		if (Objects.equals(method(), HttpMethod.GET) || Objects.equals(method(), HttpMethod.HEAD)) {
 			ByteBufAllocator alloc = channel().alloc();
 			return then(Flux.from(source)
 			    .doOnNext(ByteBuf::retain)
@@ -381,7 +394,7 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 					                         .setInt(HttpHeaderNames.CONTENT_LENGTH,
 							                         agg.readableBytes());
 				    }
-				    return send(Mono.just(agg)).then();
+				    return super.send(Mono.just(agg)).then();
 			    }));
 		}
 		return super.send(source);
@@ -481,6 +494,11 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 	}
 
 	@Override
+	protected void preSendHeadersAndStatus() {
+		//Noop
+	}
+
+	@Override
 	protected void onHandlerStart() {
 		applyHandler();
 	}
@@ -524,8 +542,8 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 			}
 			if (started) {
 				if (log.isDebugEnabled()) {
-					log.debug("{} An HttpClientOperations cannot proceed more than one "
-									+ "Response", channel(),
+					log.debug("{} An HttpClientOperations cannot proceed more than one response {}",
+							channel(),
 							response.headers()
 							        .toString());
 				}
@@ -578,6 +596,9 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 			}
 			//force auto read to enable more accurate close selection now inbound is done
 			channel().config().setAutoRead(true);
+			if (markSentBody()) {
+				markPersistent(false);
+			}
 			onHandlerTerminate();
 			return;
 		}
@@ -587,7 +608,7 @@ class HttpClientOperations extends HttpOperations<HttpClientResponse, HttpClient
 				if (msg instanceof ByteBufHolder) {
 					msg = ((ByteBufHolder) msg).content();
 				}
-				log.debug("{} HttpClientOperations received an incorrect chunk " + "" +
+				log.debug("{} HttpClientOperations received an incorrect chunk {} " +
 								"(previously used connection?)",
 						channel(), msg);
 			}

@@ -47,6 +47,8 @@ import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyPipeline;
 import reactor.ipc.netty.http.client.HttpClient;
 import reactor.ipc.netty.http.server.HttpServer;
+import reactor.util.Logger;
+import reactor.util.Loggers;
 
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
@@ -57,6 +59,8 @@ import static org.junit.Assert.assertThat;
  */
 @Ignore
 public class SmokeTests {
+
+	static final Logger log = Loggers.getLogger(SmokeTests.class);
 
 	private Processor<ByteBuf, ByteBuf> processor;
 	private NettyContext                httpServer;
@@ -114,7 +118,7 @@ public class SmokeTests {
 			for (int i = 0; i < count; i++) {
 //				System.out.println("XXXX " + x);
 				String data = x++ + "\n";
-				processor.onNext(Unpooled.copiedBuffer(data.getBytes()));
+				processor.onNext(Unpooled.copiedBuffer(data.getBytes(Charset.defaultCharset())));
 			}
 		}
 	}
@@ -131,6 +135,7 @@ public class SmokeTests {
 		Runnable srunner = new Runnable() {
 			final Sender sender = smokeTests.newSender();
 
+			@Override
 			public void run() {
 				try {
 					long start = System.currentTimeMillis();
@@ -151,7 +156,7 @@ public class SmokeTests {
 					smokeTests.printStats(1);
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 			}
 		};
@@ -279,7 +284,7 @@ public class SmokeTests {
 							                                                        Unpooled.copiedBuffer(
 									                                                        new byte[0]) :
 							                                                        Unpooled.copiedBuffer(
-									                                                        "END".getBytes()))
+									                                                        "END".getBytes(Charset.defaultCharset())))
 			                                                                        .doOnComplete(
 					                                                                        integerPostConcat::decrementAndGet))//END
 			                                                        .doOnNext(d -> integerPostConcat.getAndIncrement())
@@ -317,12 +322,13 @@ public class SmokeTests {
 		windowsData.clear();
 		Thread.sleep(1500);
 		Runnable srunner = new Runnable() {
+			@Override
 			public void run() {
 				try {
 					sender.sendNext(count);
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 			}
 		};
@@ -366,7 +372,7 @@ public class SmokeTests {
 					System.out.println("Client finished");
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 				finally {
 					thread.countDown();
@@ -405,7 +411,7 @@ public class SmokeTests {
 				sender.sendNext(count);
 			}
 			catch (Exception ie) {
-				ie.printStackTrace();
+				log.error("", ie);
 			}
 		};
 		Thread st = new Thread(srunner, "SenderThread");
@@ -445,7 +451,7 @@ public class SmokeTests {
 					System.out.println("Client finished");
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 				finally {
 					thread.countDown();

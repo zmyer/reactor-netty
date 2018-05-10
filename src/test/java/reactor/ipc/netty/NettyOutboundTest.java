@@ -114,8 +114,8 @@ public class NettyOutboundTest {
 			}
 
 			@Override
-			public FileChunkedStrategy getFileChunkedStrategy() {
-				return FILE_CHUNKED_STRATEGY_1024_NOPIPELINE;
+			public FileChunkedStrategy<?> getFileChunkedStrategy() {
+				return FILE_CHUNKED_STRATEGY_NOPIPELINE;
 			}
 		};
 		channel.writeOneOutbound(1);
@@ -182,8 +182,8 @@ public class NettyOutboundTest {
 			}
 
 			@Override
-			public FileChunkedStrategy getFileChunkedStrategy() {
-				return FILE_CHUNKED_STRATEGY_1024_NOPIPELINE;
+			public FileChunkedStrategy<?> getFileChunkedStrategy() {
+				return FILE_CHUNKED_STRATEGY_NOPIPELINE;
 			}
 		};
 		channel.writeOneOutbound(1);
@@ -248,8 +248,8 @@ public class NettyOutboundTest {
 			}
 
 			@Override
-			public FileChunkedStrategy getFileChunkedStrategy() {
-				return FILE_CHUNKED_STRATEGY_1024_NOPIPELINE;
+			public FileChunkedStrategy<?> getFileChunkedStrategy() {
+				return FILE_CHUNKED_STRATEGY_NOPIPELINE;
 			}
 		};
 		Path path = Paths.get(getClass().getResource("/largeFile.txt").toURI());
@@ -277,12 +277,12 @@ public class NettyOutboundTest {
 		assertThat(channel.finishAndReleaseAll()).isTrue();
 	}
 
-	private static final FileChunkedStrategy FILE_CHUNKED_STRATEGY_1024_NOPIPELINE =
+	private static final FileChunkedStrategy<ByteBuf> FILE_CHUNKED_STRATEGY_NOPIPELINE =
 			new FileChunkedStrategy<ByteBuf>() {
 				@Override
-				public ChunkedInput<ByteBuf> chunkFile(FileChannel fileChannel) {
+				public ChunkedInput<ByteBuf> chunkFile(FileChannel fileChannel, long offset, long length, int chunkSize) {
 					try {
-						return new ChunkedNioFile(fileChannel, 1024);
+						return new ChunkedNioFile(fileChannel, offset, length, chunkSize);
 					}
 					catch (IOException e) {
 						throw Exceptions.propagate(e);

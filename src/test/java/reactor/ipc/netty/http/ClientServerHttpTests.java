@@ -16,6 +16,7 @@
 
 package reactor.ipc.netty.http;
 
+import java.nio.charset.Charset;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,6 +42,8 @@ import reactor.ipc.netty.NettyContext;
 import reactor.ipc.netty.NettyPipeline;
 import reactor.ipc.netty.http.client.HttpClient;
 import reactor.ipc.netty.http.server.HttpServer;
+import reactor.util.Logger;
+import reactor.util.Loggers;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.assertThat;
@@ -50,6 +53,8 @@ import static org.junit.Assert.assertThat;
  */
 @Ignore
 public class ClientServerHttpTests {
+
+	static final Logger log = Loggers.getLogger(ClientServerHttpTests.class);
 
 	private NettyContext              httpServer;
 	private Processor<String, String> broadcaster;
@@ -98,6 +103,7 @@ public class ClientServerHttpTests {
 		final List<String> data1 = new ArrayList<String>();
 		final CountDownLatch latch1 = new CountDownLatch(1);
 		Runnable runner1 = new Runnable() {
+			@Override
 			public void run() {
 				try {
 					Mono<List<String>> clientDataPromise1 = getClientDataPromise();
@@ -124,6 +130,7 @@ public class ClientServerHttpTests {
 		final List<String> data2 = new ArrayList<String>();
 		final CountDownLatch latch2 = new CountDownLatch(1);
 		Runnable runner2 = new Runnable() {
+			@Override
 			public void run() {
 				try {
 					Mono<List<String>> clientDataPromise2 = getClientDataPromise();
@@ -131,7 +138,7 @@ public class ClientServerHttpTests {
 					data2.addAll(clientDataPromise2.block(Duration.ofSeconds(30)));
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 			}
 		};
@@ -307,7 +314,7 @@ public class ClientServerHttpTests {
 					datas.add(clientDataPromise.block(Duration.ofSeconds(10)));
 				}
 				catch (Exception ie) {
-					ie.printStackTrace();
+					log.error("", ie);
 				}
 			};
 			Thread t = new Thread(runner, "SmokeThread" + i);
@@ -345,17 +352,17 @@ public class ClientServerHttpTests {
 		}
 	}
 
-	public class DummyListEncoder implements Function<List<String>, ByteBuf> {
+	static class DummyListEncoder implements Function<List<String>, ByteBuf> {
 
 		final ByteBufAllocator alloc;
 
-		public DummyListEncoder(ByteBufAllocator alloc) {
+		DummyListEncoder(ByteBufAllocator alloc) {
 			this.alloc = alloc;
 		}
 
 		@Override
 		public ByteBuf apply(List<String> t) {
-			StringBuffer buf = new StringBuffer();
+			StringBuilder buf = new StringBuilder();
 			if (t.isEmpty()) {
 				buf.append("END\n");
 			}
@@ -365,7 +372,7 @@ public class ClientServerHttpTests {
 				}
 			}
 			String data = buf.toString();
-			return alloc.buffer().writeBytes(data.getBytes());
+			return alloc.buffer().writeBytes(data.getBytes(Charset.defaultCharset()));
 		}
 	}
 }
