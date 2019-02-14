@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.Http2DataFrame;
@@ -30,16 +32,22 @@ import io.netty.handler.codec.http2.HttpConversionUtil;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 final class Http2StreamBridgeHandler extends ChannelDuplexHandler {
 
 	final boolean            readForwardHeaders;
 	final ConnectionObserver listener;
+	final ServerCookieEncoder cookieEncoder;
+	final ServerCookieDecoder cookieDecoder;
 
-	Http2StreamBridgeHandler(ConnectionObserver listener, boolean readForwardHeaders) {
+	Http2StreamBridgeHandler(ConnectionObserver listener, boolean readForwardHeaders,
+			ServerCookieEncoder encoder,
+			ServerCookieDecoder decoder) {
 		this.readForwardHeaders = readForwardHeaders;
 		this.listener = listener;
+		this.cookieEncoder = encoder;
+		this.cookieDecoder = decoder;
 	}
 
 	@Override
@@ -67,14 +75,17 @@ final class Http2StreamBridgeHandler extends ChannelDuplexHandler {
 								headersFrame.headers(),
 								false);
 			}
-			new HttpToH2Operations(Connection.from(ctx.channel()),
+			HttpToH2Operations ops = new HttpToH2Operations(Connection.from(ctx.channel()),
 					listener,
 					request,
 					headersFrame.headers(),
 					ConnectionInfo.from(ctx.channel()
 					                       .parent(),
 							readForwardHeaders,
-							request)).bind();
+							request),
+					cookieEncoder, cookieDecoder);
+			ops.bind();
+			listener.onStateChange(ops, ConnectionObserver.State.CONFIGURED);
 		}
 		ctx.fireChannelRead(msg);
 	}

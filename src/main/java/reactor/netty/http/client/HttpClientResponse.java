@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package reactor.netty.http.client;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import reactor.netty.http.HttpInfos;
+import reactor.util.context.Context;
 
 /**
  * An HttpClient Reactive metadata contract for incoming response. It inherits several
@@ -31,6 +32,14 @@ import reactor.netty.http.HttpInfos;
  * @since 0.5
  */
 public interface HttpClientResponse extends HttpInfos {
+
+	/**
+	 * Return the current {@link Context} associated with the Mono/Flux exposed
+	 * via {@link HttpClient.ResponseReceiver#response()} or related terminating API.
+	 *
+	 * @return the current user {@link Context}
+	 */
+	Context currentContext();
 
 	/**
 	 * Return the previous redirections or empty array

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,19 +28,22 @@ final class TcpServerSecure extends TcpServerOperator {
 
 	final SslProvider sslProvider;
 
-	TcpServerSecure(TcpServer server, Consumer<? super SslProvider.SslContextSpec> sslProviderBuilder) {
-		super(server);
+	static TcpServerSecure secure(TcpServer server, Consumer<? super SslProvider.SslContextSpec> sslProviderBuilder) {
 		Objects.requireNonNull(sslProviderBuilder, "sslProviderBuilder");
-
 
 		SslProvider.Build builder = (SslProvider.Build) SslProvider.builder();
 		sslProviderBuilder.accept(builder);
-		this.sslProvider = builder.build();
+		return new TcpServerSecure(server, builder.build());
+	}
+
+	TcpServerSecure(TcpServer server, SslProvider sslProvider) {
+		super(server);
+		this.sslProvider = Objects.requireNonNull(sslProvider, "sslProvider");
 	}
 
 	@Override
 	public ServerBootstrap configure() {
-		return SslProvider.updateSslSupport(source.configure(), sslProvider);
+		return SslProvider.setBootstrap(source.configure(), sslProvider);
 	}
 
 	@Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -269,13 +269,23 @@ final class HttpPredicate
 
 		private final Pattern uriPattern;
 
+		static String filterQueryParams(String uri) {
+			int hasQuery = uri.lastIndexOf("?");
+			if (hasQuery != -1) {
+				return uri.substring(0, hasQuery);
+			}
+			else {
+				return uri;
+			}
+		}
+
 		/**
 		 * Creates a new {@code UriPathTemplate} from the given {@code uriPattern}.
 		 *
 		 * @param uriPattern The pattern to be used by the template
 		 */
-		public UriPathTemplate(String uriPattern) {
-			String s = "^" + uriPattern;
+		UriPathTemplate(String uriPattern) {
+			String s = "^" + filterQueryParams(uriPattern);
 
 			Matcher m = NAME_SPLAT_PATTERN.matcher(s);
 			while (m.find()) {
@@ -350,6 +360,7 @@ final class HttpPredicate
 		}
 
 		private Matcher matcher(String uri) {
+			uri = filterQueryParams(uri);
 			Matcher m = matchers.get(uri);
 			if (null == m) {
 				m = uriPattern.matcher(uri);

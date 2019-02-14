@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -241,7 +241,7 @@ public class ClientServerHttpTests {
 
 	@After
 	public void clean() {
-		httpServer.dispose();
+		httpServer.disposeNow();
 	}
 
 	public Set<Integer> findDuplicates(List<Integer> listContainingDuplicates) {
@@ -278,7 +278,7 @@ public class ClientServerHttpTests {
 				                                                    .map(new DummyListEncoder(
 						                                                    resp.alloc()
 				                                                    )))))
-		                       .wiretap()
+		                       .wiretap(true)
 		                       .bindNow();
 	}
 
@@ -290,7 +290,7 @@ public class ClientServerHttpTests {
 		HttpClient httpClient =
 				HttpClient.create()
 				          .port(httpServer.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		return httpClient.get()
 		                 .uri("/data")
@@ -375,8 +375,9 @@ public class ClientServerHttpTests {
 					buf.append(n);
 				}
 			}
-			String data = buf.toString();
-			return alloc.buffer().writeBytes(data.getBytes(Charset.defaultCharset()));
+			ByteBuf buffer = alloc.buffer();
+			buffer.writeCharSequence(buf.toString(), Charset.defaultCharset());
+			return buffer;
 		}
 	}
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ public class PostAndGetTests {
 			                       routes.get("/get/{name}", getHandler())
 			                             .post("/post", postHandler());
 		                       })
-		                       .wiretap()
+		                       .wiretap(true)
 		                       .bindNow();
 	}
 
@@ -101,7 +101,8 @@ public class PostAndGetTests {
 			                          .flatMap(data -> {
 				                          final StringBuilder response =
 						                          new StringBuilder().append("hello ")
-						                                             .append(data.toString(
+						                                             .append(data.readCharSequence(
+						                                                     data.readableBytes(),
 								                                             Charset.defaultCharset()));
 				                          System.out.println(String.format(
 						                          "%s from thread %s",
@@ -114,7 +115,7 @@ public class PostAndGetTests {
 
 	@After
 	public void teardown() {
-		httpServer.dispose();
+		httpServer.disposeNow();
 	}
 
 	@Test

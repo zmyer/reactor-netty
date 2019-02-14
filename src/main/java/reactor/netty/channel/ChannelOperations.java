@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,11 +44,12 @@ import reactor.netty.FutureMono;
 import reactor.netty.NettyInbound;
 import reactor.netty.NettyOutbound;
 import reactor.netty.NettyPipeline;
+import reactor.netty.ReactorNetty;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * {@link NettyInbound} and {@link NettyOutbound}  that apply to a {@link Connection}
@@ -233,6 +234,7 @@ public class ChannelOperations<INBOUND extends NettyInbound, OUTBOUND extends Ne
 
 	@Override
 	public NettyOutbound sendObject(Object message) {
+		onTerminate().subscribe(null, null, () -> ReactorNetty.safeRelease(message));
 		return then(FutureMono.deferFuture(() -> connection.channel()
 		                                                   .writeAndFlush(message)));
 	}
@@ -280,6 +282,13 @@ public class ChannelOperations<INBOUND extends NettyInbound, OUTBOUND extends Ne
 	@Override
 	public String toString() {
 		return "ChannelOperations{"+connection.toString()+"}";
+	}
+
+	/**
+	 * Drop pending content and complete inbound
+	 */
+	public final void discard(){
+		inbound.cancel();
 	}
 
 	/**
@@ -374,16 +383,10 @@ public class ChannelOperations<INBOUND extends NettyInbound, OUTBOUND extends Ne
 				channel().writeAndFlush(TERMINATED_OPS, this);
 			}
 			else {
+				// Returned value is deliberately ignored
 				setSuccess(null);
 			}
 		}
-	}
-
-	/**
-	 * Drop pending content and complete inbound
-	 */
-	protected final void discard(){
-		inbound.discard();
 	}
 
 	/**
@@ -415,13 +418,17 @@ public class ChannelOperations<INBOUND extends NettyInbound, OUTBOUND extends Ne
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise setSuccess() {
+		// Returned value is deliberately ignored
 		setSuccess(null);
 		return this;
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise setSuccess(Void result) {
+		// Returned value is deliberately ignored
 		super.setSuccess(result);
 		return this;
 	}
@@ -442,31 +449,41 @@ public class ChannelOperations<INBOUND extends NettyInbound, OUTBOUND extends Ne
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise setFailure(Throwable cause) {
+		// Returned value is deliberately ignored
 		super.setFailure(cause);
 		return this;
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise addListener(GenericFutureListener<? extends Future<? super Void>> listener) {
+		// Returned value is deliberately ignored
 		super.addListener(listener);
 		return this;
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise addListeners(GenericFutureListener<? extends Future<? super Void>>... listeners) {
+		// Returned value is deliberately ignored
 		super.addListeners(listeners);
 		return this;
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise removeListener(GenericFutureListener<? extends Future<? super Void>> listener) {
+		// Returned value is deliberately ignored
 		super.removeListener(listener);
 		return this;
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public ChannelPromise removeListeners(GenericFutureListener<? extends Future<? super Void>>... listeners) {
+		// Returned value is deliberately ignored
 		super.removeListeners(listeners);
 		return this;
 	}

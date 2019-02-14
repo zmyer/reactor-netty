@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -167,7 +167,7 @@ public interface HttpServerResponse extends NettyOutbound, HttpInfos {
 		return sendWebsocket(null, websocketHandler);
 	}
 
-	 /**
+	/**
 	 * Upgrade connection to Websocket with optional subprotocol(s). Mono and Callback
 	 * are invoked on handshake success, otherwise the returned {@link Mono} fails.
 	 *
@@ -176,7 +176,23 @@ public interface HttpServerResponse extends NettyOutbound, HttpInfos {
 	 *
 	 * @return a {@link Mono} completing when upgrade is confirmed
 	 */
+	default Mono<Void> sendWebsocket(@Nullable String protocols,
+			BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<Void>> websocketHandler) {
+		return sendWebsocket(protocols, 65536, websocketHandler);
+	}
+
+	 /**
+	 * Upgrade connection to Websocket with optional subprotocol(s). Mono and Callback
+	 * are invoked on handshake success, otherwise the returned {@link Mono} fails.
+	 *
+	 * @param protocols optional sub-protocol
+	 * @param maxFramePayloadLength maximum allowable frame payload length
+	 * @param websocketHandler the in/out handler for ws transport
+	 *
+	 * @return a {@link Mono} completing when upgrade is confirmed
+	 */
 	Mono<Void> sendWebsocket(@Nullable String protocols,
+			int maxFramePayloadLength,
 			BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<Void>> websocketHandler);
 
 

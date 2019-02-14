@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -67,7 +68,7 @@ public class ChannelOperationsHandlerTest {
 				                     .asString()
 				                     .doOnNext(System.err::println)
 				                     .then(res.status(200).sendHeaders().then()))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow(Duration.ofSeconds(30));
 
 		Flux<String> flux = Flux.range(1, 257).map(count -> count + "");
@@ -77,7 +78,7 @@ public class ChannelOperationsHandlerTest {
 		Mono<Integer> code =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .wiretap()
+				          .wiretap(true)
 				          .post()
 				          .uri("/")
 				          .send(ByteBufFlux.fromString(flux))
@@ -89,7 +90,7 @@ public class ChannelOperationsHandlerTest {
 		            .expectComplete()
 		            .verify(Duration.ofSeconds(30));
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -126,7 +127,7 @@ public class ChannelOperationsHandlerTest {
 		int abortServerPort = SocketUtils.findAvailableTcpPort();
 		ConnectionAbortServer abortServer = new ConnectionAbortServer(abortServerPort);
 
-		threadPool.submit(abortServer);
+		Future<?> f = threadPool.submit(abortServer);
 
 		if(!abortServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("Fail to start test server");
@@ -135,17 +136,19 @@ public class ChannelOperationsHandlerTest {
 		ByteBufFlux response =
 				HttpClient.create()
 				          .port(abortServerPort)
-				          .wiretap()
+				          .wiretap(true)
 				          .request(HttpMethod.GET)
 				          .uri("/")
 				          .send((req, out) -> out.sendString(Flux.just("a", "b", "c")))
 				          .responseContent();
 
 		StepVerifier.create(response.log())
-		            .expectErrorMessage("Connection closed prematurely")
+		            .expectError(IOException.class)
 		            .verify();
 
 		abortServer.close();
+
+		assertThat(f.get()).isNull();
 	}
 
 	static final Logger log = Loggers.getLogger(ChannelOperationsHandlerTest.class);
@@ -210,7 +213,7 @@ public class ChannelOperationsHandlerTest {
 		int testServerPort = SocketUtils.findAvailableTcpPort();
 		TestServer testServer = new TestServer(testServerPort);
 
-		threadPool.submit(testServer);
+		Future<?> f = threadPool.submit(testServer);
 
 		if(!testServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("Fail to start test server");
@@ -219,7 +222,7 @@ public class ChannelOperationsHandlerTest {
 		HttpClient client =
 		        HttpClient.newConnection()
 		                  .port(testServerPort)
-		                  .wiretap();
+		                  .wiretap(true);
 
 		Flux.range(0, 2)
 		    .concatMap(i -> client.get()
@@ -231,6 +234,8 @@ public class ChannelOperationsHandlerTest {
 		    .blockLast(Duration.ofSeconds(10));
 
 		testServer.close();
+
+		assertThat(f.get()).isNull();
 	}
 
 	private static final class TestServer extends CountDownLatch implements Runnable {

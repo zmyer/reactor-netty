@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufHolder;
 import io.netty.buffer.Unpooled;
+import io.netty.util.IllegalReferenceCountException;
 import org.reactivestreams.Publisher;
 import reactor.core.CoreSubscriber;
 import reactor.core.publisher.Flux;
@@ -83,10 +84,14 @@ public final class ByteBufFlux extends FluxOperator<ByteBuf, ByteBuf> {
 
 	public static ByteBufFlux fromString(Publisher<? extends String> source, Charset charset, ByteBufAllocator allocator) {
 		Objects.requireNonNull(allocator, "allocator");
-		return new ByteBufFlux(Flux.from(source)
-		                           .map(s -> allocator.buffer()
-		                                              .writeBytes(s.getBytes(charset))),
-		                       allocator);
+		return new ByteBufFlux(
+				Flux.from(source)
+				    .map(s -> {
+				        ByteBuf buffer = allocator.buffer();
+				        buffer.writeCharSequence(s, charset);
+				        return buffer;
+				    }),
+				allocator);
 	}
 
 	/**
@@ -173,7 +178,14 @@ public final class ByteBufFlux extends FluxOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link ByteBuffer} inbound {@link Flux}
 	 */
 	public final Flux<ByteBuffer> asByteBuffer() {
-		return map(ByteBuf::nioBuffer);
+		return handle((bb, sink) -> {
+			try {
+				sink.next(bb.nioBuffer());
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**
@@ -182,10 +194,15 @@ public final class ByteBufFlux extends FluxOperator<ByteBuf, ByteBuf> {
 	 * @return a {@literal byte[]} inbound {@link Flux}
 	 */
 	public final Flux<byte[]> asByteArray() {
-		return map(bb -> {
-			byte[] bytes = new byte[bb.readableBytes()];
-			bb.readBytes(bytes);
-			return bytes;
+		return handle((bb, sink) -> {
+			try {
+				byte[] bytes = new byte[bb.readableBytes()];
+				bb.readBytes(bytes);
+				sink.next(bytes);
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
 		});
 	}
 
@@ -195,7 +212,14 @@ public final class ByteBufFlux extends FluxOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link InputStream} inbound {@link Flux}
 	 */
 	public Flux<InputStream> asInputStream() {
-		return map(ByteBufMono.ReleasingInputStream::new);
+		return handle((bb, sink) -> {
+			try {
+				sink.next(new ByteBufMono.ReleasingInputStream(bb));
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**
@@ -215,7 +239,14 @@ public final class ByteBufFlux extends FluxOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link String} inbound {@link Flux}
 	 */
 	public final Flux<String> asString(Charset charset) {
-		return map(bb -> bb.toString(charset));
+		return handle((bb, sink) -> {
+			try {
+				sink.next(bb.readCharSequence(bb.readableBytes(), charset).toString());
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**

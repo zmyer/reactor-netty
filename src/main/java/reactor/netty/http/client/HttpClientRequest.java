@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package reactor.netty.http.client;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.cookie.Cookie;
 import reactor.netty.http.HttpInfos;
+import reactor.util.context.Context;
 
 /**
  * An Http Reactive client metadata contract for outgoing requests. It inherits several
@@ -35,6 +36,7 @@ public interface HttpClientRequest extends HttpInfos {
 	 * @return this outbound
 	 */
 	HttpClientRequest addCookie(Cookie cookie);
+
 	/**
 	 * Add an outbound http header, appending the value if the header is already set.
 	 *
@@ -44,13 +46,6 @@ public interface HttpClientRequest extends HttpInfos {
 	 * @return this outbound
 	 */
 	HttpClientRequest addHeader(CharSequence name, CharSequence value);
-
-	/**
-	 * Return  true if headers and status have been sent to the client
-	 *
-	 * @return true if headers and status have been sent to the client
-	 */
-	boolean hasSentHeaders();
 
 	/**
 	 * Set an outbound header, replacing any pre-existing value.
@@ -73,18 +68,19 @@ public interface HttpClientRequest extends HttpInfos {
 	HttpClientRequest headers(HttpHeaders headers);
 
 	/**
+	 * Return the current {@link Context} associated with the Mono/Flux exposed
+	 * via {@link HttpClient.ResponseReceiver#response()} or related terminating API.
+	 *
+	 * @return the current user {@link Context}
+	 */
+	Context currentContext();
+
+	/**
 	 * Return true  if redirected will be followed
 	 *
 	 * @return true if redirected will be followed
 	 */
 	boolean isFollowRedirect();
-
-	/**
-	 * set the request keepAlive if true otherwise remove the existing connection keep alive header
-	 *
-	 * @return this outbound
-	 */
-	HttpClientRequest keepAlive(boolean keepAlive);
 
 	/**
 	 * Return the previous redirections or empty array

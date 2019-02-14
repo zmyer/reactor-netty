@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -97,6 +97,7 @@ public abstract class HttpOperations<INBOUND extends NettyInbound, OUTBOUND exte
 					outboundHttpMessage().headers()
 							.remove(HttpHeaderNames.TRANSFER_ENCODING);
 					if (HttpUtil.getContentLength(outboundHttpMessage(), 0) == 0) {
+						markSentBody();
 						msg = newFullEmptyBodyMessage();
 					}
 					else {
@@ -226,12 +227,12 @@ public abstract class HttpOperations<INBOUND extends NettyInbound, OUTBOUND exte
 	final static ChannelInboundHandler HTTP_EXTRACTOR = NettyPipeline.inboundHandler(
 			(ctx, msg) -> {
 				if (msg instanceof ByteBufHolder) {
-					ByteBuf bb = ((ByteBufHolder) msg).content();
 					if(msg instanceof FullHttpMessage){
 						// TODO convert into 2 messages if FullHttpMessage
 						ctx.fireChannelRead(msg);
 					}
 					else {
+						ByteBuf bb = ((ByteBufHolder) msg).content();
 						ctx.fireChannelRead(bb);
 						if (msg instanceof LastHttpContent) {
 							ctx.fireChannelRead(LastHttpContent.EMPTY_LAST_CONTENT);

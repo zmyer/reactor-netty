@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,15 +19,23 @@ package reactor.netty.tcp;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import javax.annotation.Nullable;
 
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelPipeline;
+import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.proxy.HttpProxyHandler;
 import io.netty.handler.proxy.ProxyHandler;
 import io.netty.handler.proxy.Socks4ProxyHandler;
 import io.netty.handler.proxy.Socks5ProxyHandler;
+import reactor.netty.ConnectionObserver;
+import reactor.netty.NettyPipeline;
+import reactor.netty.channel.BootstrapHandlers;
 
 /**
  * Proxy configuration
@@ -43,6 +51,24 @@ public final class ProxyProvider {
 	 */
 	public static ProxyProvider.TypeSpec builder() {
 		return new ProxyProvider.Build();
+	}
+
+	/**
+	 * Find Proxy support in the given client bootstrap
+	 *
+	 * @param b a bootstrap to search
+	 *
+	 * @return any {@link ProxyProvider} found or null
+	 */
+	@Nullable
+	public static ProxyProvider findProxySupport(Bootstrap b) {
+		ProxyProvider.DeferredProxySupport proxy =
+				BootstrapHandlers.findConfiguration(ProxyProvider.DeferredProxySupport.class, b.config().handler());
+
+		if (proxy == null) {
+			return null;
+		}
+		return proxy.proxyProvider;
 	}
 
 	final String username;
@@ -134,7 +160,11 @@ public final class ProxyProvider {
 	 * @return true if of type {@link InetSocketAddress} and hostname candidate to proxy
 	 */
 	public boolean shouldProxy(SocketAddress address) {
-		return address instanceof InetSocketAddress && shouldProxy(((InetSocketAddress) address).getHostString());
+		SocketAddress addr = address;
+		if (address instanceof TcpUtils.SocketAddressSupplier) {
+			addr = ((TcpUtils.SocketAddressSupplier) address).get();
+		}
+		return addr instanceof InetSocketAddress && shouldProxy(((InetSocketAddress) addr).getHostString());
 	}
 
 	/**
@@ -171,6 +201,35 @@ public final class ProxyProvider {
 	@Override
 	public String toString() {
 		return "ProxyProvider{" + asDetailedString() + "}";
+	}
+
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) {
+			return true;
+		}
+		if (o == null || getClass() != o.getClass()) {
+			return false;
+		}
+		ProxyProvider that = (ProxyProvider) o;
+		return Objects.equals(username, that.username) &&
+				Objects.equals(getPasswordValue(), that.getPasswordValue()) &&
+				Objects.equals(getAddress().get(), that.getAddress().get()) &&
+				Objects.equals(getNonProxyHosts(), that.getNonProxyHosts()) &&
+				getType() == that.getType();
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(username, getPasswordValue(), getAddress().get(), getNonProxyHosts(), getType());
+	}
+
+	@Nullable
+	private String getPasswordValue() {
+		if (username == null || password == null) {
+			return null;
+		}
+		return password.apply(username);
 	}
 
 	static final class Build implements TypeSpec, AddressSpec, Builder {
@@ -320,5 +379,64 @@ public final class ProxyProvider {
 		 * @return builds new ProxyProvider
 		 */
 		ProxyProvider build();
+	}
+
+	static final class DeferredProxySupport
+			implements Function<Bootstrap, BiConsumer<ConnectionObserver, Channel>> {
+
+		final ProxyProvider proxyProvider;
+
+		DeferredProxySupport(ProxyProvider proxyProvider) {
+			this.proxyProvider = proxyProvider;
+		}
+
+		@Override
+		public BiConsumer<ConnectionObserver, Channel> apply(Bootstrap bootstrap) {
+			return new ProxySupportConsumer(bootstrap, proxyProvider);
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			DeferredProxySupport that = (DeferredProxySupport) o;
+			return Objects.equals(proxyProvider, that.proxyProvider);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(proxyProvider);
+		}
+	}
+
+	static final class ProxySupportConsumer
+			implements BiConsumer<ConnectionObserver, Channel> {
+
+		final Bootstrap bootstrap;
+		final ProxyProvider proxyProvider;
+
+		ProxySupportConsumer(Bootstrap bootstrap, ProxyProvider proxyProvider) {
+			this.bootstrap = bootstrap;
+			this.proxyProvider = proxyProvider;
+		}
+
+		@Override
+		public void accept(ConnectionObserver connectionObserver, Channel channel) {
+			if (proxyProvider.shouldProxy(bootstrap.config()
+			                                       .remoteAddress())) {
+
+				ChannelPipeline pipeline = channel.pipeline();
+				pipeline.addFirst(NettyPipeline.ProxyHandler,
+								proxyProvider.newProxyHandler());
+
+				if (TcpUtils.log.isDebugEnabled()) {
+					pipeline.addFirst(new LoggingHandler("reactor.netty.proxy"));
+				}
+			}
+		}
 	}
 }

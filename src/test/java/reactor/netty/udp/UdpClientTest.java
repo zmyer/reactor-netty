@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,9 +46,11 @@ public class UdpClientTest {
 				                                    .map(o -> {
 				                                            if (o instanceof DatagramPacket) {
 				                                                DatagramPacket received = (DatagramPacket) o;
-				                                                System.out.println("Server received " + received.content().toString(CharsetUtil.UTF_8));
+				                                                ByteBuf buffer = received.content();
+				                                                System.out.println("Server received " + buffer.readCharSequence(buffer.readableBytes(), CharsetUtil.UTF_8));
 				                                                ByteBuf buf1 = Unpooled.copiedBuffer("echo ", CharsetUtil.UTF_8);
-				                                                ByteBuf buf2 = Unpooled.copiedBuffer(buf1, received.content().retain());
+				                                                ByteBuf buf2 = Unpooled.copiedBuffer(buf1, buffer);
+				                                                buf1.release();
 				                                                return new DatagramPacket(buf2, received.sender());
 				                                            }
 				                                            else {
@@ -56,9 +58,10 @@ public class UdpClientTest {
 				                                            }
 				                                    })
 				                                    .flatMap(out::sendObject))
-				         .wiretap()
+				         .wiretap(true)
 				         .bind()
 				         .block(Duration.ofSeconds(30));
+		assertThat(server).isNotNull();
 
 		Connection client1 =
 				UdpClient.create()
@@ -67,16 +70,17 @@ public class UdpClientTest {
 				         .handle((in, out) -> {
 				                                  in.receive()
 				                                    .subscribe(b -> {
-				                                        System.out.println("Client1 received " + b.toString(CharsetUtil.UTF_8));
+				                                        System.out.println("Client1 received " + b.readCharSequence(b.readableBytes(), CharsetUtil.UTF_8));
 				                                        latch.countDown();
 				                                    });
 				                                  return out.sendString(Mono.just("ping1"))
 				                                            .then(out.sendString(Mono.just("ping2")))
 				                                            .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connect()
 				         .block(Duration.ofSeconds(30));
+		assertThat(client1).isNotNull();
 
 		Connection client2 =
 				UdpClient.create()
@@ -85,30 +89,35 @@ public class UdpClientTest {
 				         .handle((in, out) -> {
 				                                  in.receive()
 				                                    .subscribe(b -> {
-				                                        System.out.println("Client2 received " + b.toString(CharsetUtil.UTF_8));
+				                                        System.out.println("Client2 received " + b.readCharSequence(b.readableBytes(), CharsetUtil.UTF_8));
 				                                        latch.countDown();
 				                                    });
 				                                  return out.sendString(Mono.just("ping3"))
 				                                            .then(out.sendString(Mono.just("ping4")))
 				                                            .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connect()
 				         .block(Duration.ofSeconds(30));
+		assertThat(client2).isNotNull();
 
 		assertTrue(latch.await(30, TimeUnit.SECONDS));
-		server.dispose();
-		client1.dispose();
-		client2.dispose();
+		server.disposeNow();
+		client1.disposeNow();
+		client2.disposeNow();
 	}
 
 	@Test
 	public void testIssue192() {
-		UdpServer server = UdpServer.create();
-		UdpClient client = UdpClient.create();
-		assertThat(Thread.getAllStackTraces().keySet().stream().allMatch(t -> !t.getName().startsWith("udp"))).isTrue();
+		LoopResources resources = LoopResources.create("testIssue192");
+		UdpServer server = UdpServer.create()
+		                            .runOn(resources);
+		UdpClient client = UdpClient.create()
+		                            .runOn(resources);
+		assertThat(Thread.getAllStackTraces().keySet().stream().noneMatch(t -> t.getName().startsWith("testIssue192"))).isTrue();
 		server.bind();
 		client.connect();
-		assertThat(Thread.getAllStackTraces().keySet().stream().anyMatch(t -> t.getName().startsWith("udp"))).isTrue();
+		assertThat(Thread.getAllStackTraces().keySet().stream().anyMatch(t -> t.getName().startsWith("testIssue192"))).isTrue();
+		resources.dispose();
 	}
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -133,7 +133,7 @@ final class ConnectionInfo {
 			String remoteIpValue = request.headers().get(XFORWARDED_IP_HEADER).split(",")[0];
 			remoteAddress = parseAddress(remoteIpValue, remoteAddress.getPort());
 		}
-		else if(request.headers().contains(XFORWARDED_HOST_HEADER)) {
+		if(request.headers().contains(XFORWARDED_HOST_HEADER)) {
 			if(request.headers().contains(XFORWARDED_PORT_HEADER)) {
 				hostAddress = InetSocketAddressUtil.createUnresolved(
 						request.headers().get(XFORWARDED_HOST_HEADER).split(",")[0].trim(),

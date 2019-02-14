@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ final class TcpClientSecure extends TcpClientOperator {
 
 	@Override
 	public Bootstrap configure() {
-		return SslProvider.updateSslSupport(source.configure(), sslProvider);
+		return SslProvider.setBootstrap(source.configure(), sslProvider);
 	}
 
 	@Override

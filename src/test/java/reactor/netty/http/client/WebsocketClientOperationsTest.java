@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,20 +57,18 @@ public class WebsocketClientOperationsTest {
 						return res.sendWebsocket(serverSubprotocol, (i, o) -> o.sendString(Mono.just("test")));
 					})
 			)
-		                                  .wiretap()
+		                                  .wiretap(true)
 		                                  .bindNow();
 
 		Flux<String> response =
 			HttpClient.create()
-			          .port(httpServer.address().getPort())
-			          .wiretap()
+			          .port(httpServer.port())
+			          .wiretap(true)
+			          .headersWhen(h -> login(httpServer.port()).map(token -> h.set(
+					          "Authorization",
+					          token)))
 			          .websocket(clientSubprotocol)
 			          .uri("/ws")
-			          .send(request ->
-			              Mono.just(request)
-			                  .transform(req -> doLoginFirst(req, httpServer.address().getPort()))
-					          .then()
-			          )
 			          .handle((i, o) -> i.receive().asString())
 			          .log()
 			          .switchIfEmpty(Mono.error(new Exception()));
@@ -79,7 +77,7 @@ public class WebsocketClientOperationsTest {
 		            .expectError(WebSocketHandshakeException.class)
 		            .verify();
 
-		httpServer.dispose();
+		httpServer.disposeNow();
 	}
 
 	private Mono<HttpClientRequest> doLoginFirst(Mono<HttpClientRequest> request, int port) {
@@ -94,7 +92,7 @@ public class WebsocketClientOperationsTest {
 	private Mono<String> login(int port) {
 		return HttpClient.create()
 		                 .port(port)
-		                 .wiretap()
+		                 .wiretap(true)
 		                 .post()
 		                 .uri("/login")
 		                 .responseSingle((res, buf) -> Mono.just(res.status().code() + ""));

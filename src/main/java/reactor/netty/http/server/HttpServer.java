@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ import java.util.function.Function;
 import javax.annotation.Nullable;
 
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
@@ -33,6 +35,7 @@ import reactor.core.publisher.Mono;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.DisposableServer;
+import reactor.netty.NettyPipeline;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.tcp.SslProvider;
@@ -159,13 +162,22 @@ public abstract class HttpServer {
 	}
 
 	/**
-	 * Enable GZip response compression if the client request presents accept encoding
-	 * headers.
+	 * Specifies whether GZip response compression/websocket compression
+	 * extension is enabled if the client request
+	 * presents accept encoding/websocket extensions headers.
 	 *
+	 * @param compressionEnabled if true GZip response compression/websocket compression
+	 *                             extension is enabled if the client request presents
+	 *                             accept encoding/websocket extensions headers, otherwise disabled.
 	 * @return a new {@link HttpServer}
 	 */
-	public final HttpServer compress() {
-		return tcpConfiguration(COMPRESS_ATTR_CONFIG);
+	public final HttpServer compress(boolean compressionEnabled) {
+		if (compressionEnabled) {
+			return tcpConfiguration(COMPRESS_ATTR_CONFIG);
+		}
+		else {
+			return tcpConfiguration(COMPRESS_ATTR_DISABLE);
+		}
 	}
 
 	/**
@@ -202,13 +214,21 @@ public abstract class HttpServer {
 	}
 
 	/**
-	 * Enable support for the {@code "Forwarded"} and {@code "X-Forwarded-*"}
-	 * HTTP request headers for deriving information about the connection.
+	 * Specifies whether support for the {@code "Forwarded"} and {@code "X-Forwarded-*"}
+	 * HTTP request headers for deriving information about the connection is enabled.
 	 *
+	 * @param forwardedEnabled if true support for the {@code "Forwarded"} and {@code "X-Forwarded-*"}
+	 *                         HTTP request headers for deriving information about the connection is enabled,
+	 *                         otherwise disabled.
 	 * @return a new {@link HttpServer}
 	 */
-	public final HttpServer forwarded() {
-		return tcpConfiguration(FORWARD_ATTR_CONFIG);
+	public final HttpServer forwarded(boolean forwardedEnabled) {
+		if (forwardedEnabled) {
+			return tcpConfiguration(FORWARD_ATTR_CONFIG);
+		}
+		else {
+			return tcpConfiguration(FORWARD_ATTR_DISABLE);
+		}
 	}
 
 	/**
@@ -250,22 +270,33 @@ public abstract class HttpServer {
 	}
 
 	/**
-	 * Disable gzip compression
+	 * Configure the
+	 * {@link ServerCookieEncoder}, {@link ServerCookieDecoder} will be
+	 * chosen based on the encoder
+	 *
+	 * @param encoder the preferred ServerCookieEncoder
 	 *
 	 * @return a new {@link HttpServer}
 	 */
-	public final HttpServer noCompression() {
-		return tcpConfiguration(COMPRESS_ATTR_DISABLE);
+	public final HttpServer cookieCodec(ServerCookieEncoder encoder) {
+		ServerCookieDecoder decoder = encoder == ServerCookieEncoder.LAX ?
+				ServerCookieDecoder.LAX : ServerCookieDecoder.STRICT;
+		return tcpConfiguration(tcp -> tcp.bootstrap(
+				b -> HttpServerConfiguration.cookieCodec(b, encoder, decoder)));
 	}
 
 	/**
-	 * Disable support for the {@code "Forwarded"} and {@code "X-Forwarded-*"}
-	 * HTTP request headers.
+	 * Configure the
+	 * {@link ServerCookieEncoder} and {@link ServerCookieDecoder}
+	 *
+	 * @param encoder the preferred ServerCookieEncoder
+	 * @param decoder the preferred ServerCookieDecoder
 	 *
 	 * @return a new {@link HttpServer}
 	 */
-	public final HttpServer noForwarded() {
-		return tcpConfiguration(FORWARD_ATTR_DISABLE);
+	public final HttpServer cookieCodec(ServerCookieEncoder encoder, ServerCookieDecoder decoder) {
+		return tcpConfiguration(tcp -> tcp.bootstrap(
+				b -> HttpServerConfiguration.cookieCodec(b, encoder, decoder)));
 	}
 
 	/**
@@ -359,10 +390,31 @@ public abstract class HttpServer {
 	 * and {@code DEBUG} logger level
 	 *
 	 * @return a new {@link HttpServer}
+	 * @deprecated Use {@link HttpServer#wiretap(boolean)}
 	 */
+	@Deprecated
 	public final HttpServer wiretap() {
 		return tcpConfiguration(tcpServer ->
 		        tcpServer.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+	}
+
+	/**
+	 * Apply or remove a wire logger configuration using {@link HttpServer} category
+	 * and {@code DEBUG} logger level
+	 *
+	 * @param enable Specifies whether the wire logger configuration will be added to
+	 *               the pipeline
+	 * @return a new {@link HttpServer}
+	 */
+	public final HttpServer wiretap(boolean enable) {
+		if (enable) {
+			return tcpConfiguration(tcpServer ->
+			        tcpServer.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+		}
+		else {
+			return tcpConfiguration(tcpServer ->
+			        tcpServer.bootstrap(b -> BootstrapHandlers.removeConfiguration(b, NettyPipeline.LoggingHandler)));
+		}
 	}
 
 	/**

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package reactor.netty.tcp;
 
+import java.net.SocketAddress;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import javax.annotation.Nullable;
@@ -29,6 +30,9 @@ import reactor.core.publisher.Mono;
 import reactor.netty.Connection;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.netty.resources.LoopResources;
+import reactor.util.Logger;
+import reactor.util.Loggers;
+import reactor.util.annotation.NonNull;
 
 /**
  * Hold the default Tcp resources
@@ -71,7 +75,7 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 	 * @return the global HTTP resources
 	 */
 	public static TcpResources reset() {
-		shutdown();
+		disposeLoopsAndConnections();
 		return getOrCreate(tcpResources, null, null, ON_TCP_NEW, "tcp");
 	}
 
@@ -79,7 +83,7 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 	 * Shutdown the global {@link TcpResources} without resetting them,
 	 * effectively cleaning up associated resources without creating new ones.
 	 */
-	public static void shutdown() {
+	public static void disposeLoopsAndConnections() {
 		TcpResources resources = tcpResources.getAndSet(null);
 		if (resources != null) {
 			resources._dispose();
@@ -91,9 +95,9 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 	 * effectively cleaning up associated resources without creating new ones. This only
 	 * occurs when the returned {@link Mono} is subscribed to.
 	 *
-	 * @return a {@link Mono} triggering the {@link #shutdown()} when subscribed to.
+	 * @return a {@link Mono} triggering the {@link #disposeLoopsAndConnections()} when subscribed to.
 	 */
-	public static Mono<Void> shutdownLater() {
+	public static Mono<Void> disposeLoopsAndConnectionsLater() {
 		return Mono.defer(() -> {
 			TcpResources resources = tcpResources.getAndSet(null);
 			if (resources != null) {
@@ -125,7 +129,6 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 	/**
 	 * Dispose underlying resources
 	 */
-	//TODO make public?
 	protected void _dispose(){
 		defaultProvider.dispose();
 		defaultLoops.dispose();
@@ -143,6 +146,11 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 	@Override
 	public boolean isDisposed() {
 		return defaultLoops.isDisposed() && defaultProvider.isDisposed();
+	}
+
+	@Override
+	public void disposeWhen(@NonNull SocketAddress address) {
+		defaultProvider.disposeWhen(address);
 	}
 
 	@Override
@@ -190,6 +198,8 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 		return defaultLoops.daemon();
 	}
 
+
+
 	/**
 	 * Safely check if existing resource exist and proceed to update/cleanup if new
 	 * resources references are passed.
@@ -214,12 +224,30 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 			if (resources == null || loops != null || provider != null) {
 				update = create(resources, loops, provider, name, onNew);
 				if (ref.compareAndSet(resources, update)) {
-					if(resources != null){
-						if(loops != null){
+					if(resources != null) {
+						if(loops != null) {
+							if (log.isWarnEnabled()) {
+								log.warn("[{}] resources will use a new LoopResources: {}," +
+										"the previous LoopResources will be disposed", name, loops);
+							}
 							resources.defaultLoops.dispose();
 						}
-						if(provider != null){
+						if(provider != null) {
+							if (log.isWarnEnabled()) {
+								log.warn("[{}] resources will use a new ConnectionProvider: {}," +
+										"the previous ConnectionProvider will be disposed", name, provider);
+							}
 							resources.defaultProvider.dispose();
+						}
+					}
+					else {
+						String loopType = loops == null ? "default" : "provided";
+						if (log.isDebugEnabled()) {
+							log.debug("[{}] resources will use the {} LoopResources: {}", name, loopType, update.defaultLoops);
+						}
+						String poolType = provider == null ? "default" : "provided";
+						if (log.isDebugEnabled()) {
+							log.debug("[{}] resources will use the {} ConnectionProvider: {}", name, poolType, update.defaultProvider);
 						}
 					}
 					return update;
@@ -234,6 +262,7 @@ public class TcpResources implements ConnectionProvider, LoopResources {
 		}
 	}
 
+	static final Logger                                                      log = Loggers.getLogger(TcpResources.class);
 	static final AtomicReference<TcpResources>                               tcpResources;
 	static final BiFunction<LoopResources, ConnectionProvider, TcpResources> ON_TCP_NEW;
 

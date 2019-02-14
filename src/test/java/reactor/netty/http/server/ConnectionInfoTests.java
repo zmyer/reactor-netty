@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -103,6 +103,21 @@ public class ConnectionInfoTests {
 	}
 
 	@Test
+	public void xForwardedForHostAndPort() {
+		testClientRequest(
+				clientRequestHeaders -> {
+                    clientRequestHeaders.add("X-Forwarded-For", "192.168.0.1");
+					clientRequestHeaders.add("X-Forwarded-Host", "a.example.com");
+					clientRequestHeaders.add("X-Forwarded-Port", "8080");
+				},
+				serverRequest -> {
+					Assertions.assertThat(serverRequest.remoteAddress().getHostString()).isEqualTo("192.168.0.1") ;
+					Assertions.assertThat(serverRequest.hostAddress().getHostString()).isEqualTo("a.example.com");
+					Assertions.assertThat(serverRequest.hostAddress().getPort()).isEqualTo(8080);
+				});
+	}
+
+	@Test
 	public void forwardedMultipleHosts() {
 		testClientRequest(
 				clientRequestHeaders -> clientRequestHeaders.add("Forwarded",
@@ -188,7 +203,7 @@ public class ConnectionInfoTests {
 
 		this.connection =
 				HttpServer.create()
-				          .forwarded()
+				          .forwarded(true)
 				          .port(0)
 				          .handle((req, res) -> {
 				              try {
@@ -201,13 +216,13 @@ public class ConnectionInfoTests {
 				                            .sendString(Mono.just(e.getMessage()));
 				              }
 				          })
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		String response =
 				HttpClient.create()
 				          .port(this.connection.address().getPort())
-				          .wiretap()
+				          .wiretap(true)
 				          .headers(clientRequestHeadersConsumer)
 				          .get()
 				          .uri("/test")
@@ -221,7 +236,7 @@ public class ConnectionInfoTests {
 
 	@After
 	public void tearDown() {
-		this.connection.dispose();
+		this.connection.disposeNow();
 	}
 
 }

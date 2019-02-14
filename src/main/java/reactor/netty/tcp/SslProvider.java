@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,12 +43,12 @@ import io.netty.handler.ssl.SupportedCipherSuiteFilter;
 import reactor.core.Exceptions;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.NettyPipeline;
-import reactor.netty.SystemPropertiesNames;
+import reactor.netty.ReactorNetty;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * SSL Provider
@@ -101,7 +101,7 @@ public final class SslProvider {
 	 *
 	 * @return an enriched bootstrap
 	 */
-	public static Bootstrap updateSslSupport(Bootstrap b, SslProvider sslProvider) {
+	public static Bootstrap setBootstrap(Bootstrap b, SslProvider sslProvider) {
 		BootstrapHandlers.updateConfiguration(b,
 				NettyPipeline.SslHandler,
 				new DeferredSslSupport(sslProvider));
@@ -260,14 +260,9 @@ public final class SslProvider {
 		NONE,
 		/**
 		 * {@link io.netty.handler.ssl.SslProvider} will be set depending on
-		 * <code>OpenSsl.isAlpnSupported()</code>
+		 * <code>OpenSsl.isAvailable()</code>
 		 */
 		TCP,
-		/**
-		 * {@link io.netty.handler.ssl.SslProvider} will be set depending on
-		 * <code>OpenSsl.isAlpnSupported()</code>
-		 */
-		HTTP11,
 		/**
 		 * {@link io.netty.handler.ssl.SslProvider} will be set depending on
 		 * <code>OpenSsl.isAlpnSupported()</code>,
@@ -298,6 +293,7 @@ public final class SslProvider {
 	final long                         closeNotifyFlushTimeoutMillis;
 	final long                         closeNotifyReadTimeoutMillis;
 	final Consumer<? super SslHandler> handlerConfigurator;
+	final int                          builderHashCode;
 
 	SslProvider(SslProvider.Build builder) {
 		this.sslContextBuilder = builder.sslCtxBuilder;
@@ -324,6 +320,7 @@ public final class SslProvider {
 		this.handshakeTimeoutMillis = builder.handshakeTimeoutMillis;
 		this.closeNotifyFlushTimeoutMillis = builder.closeNotifyFlushTimeoutMillis;
 		this.closeNotifyReadTimeoutMillis = builder.closeNotifyReadTimeoutMillis;
+		this.builderHashCode = builder.hashCode();
 	}
 
 	SslProvider(SslProvider from, Consumer<? super SslHandler> handlerConfigurator) {
@@ -342,6 +339,7 @@ public final class SslProvider {
 		this.handshakeTimeoutMillis = from.handshakeTimeoutMillis;
 		this.closeNotifyFlushTimeoutMillis = from.closeNotifyFlushTimeoutMillis;
 		this.closeNotifyReadTimeoutMillis = from.closeNotifyReadTimeoutMillis;
+		this.builderHashCode = from.builderHashCode;
 	}
 
 	SslProvider(SslProvider from, DefaultConfigurationType type) {
@@ -362,26 +360,29 @@ public final class SslProvider {
 		this.handshakeTimeoutMillis = from.handshakeTimeoutMillis;
 		this.closeNotifyFlushTimeoutMillis = from.closeNotifyFlushTimeoutMillis;
 		this.closeNotifyReadTimeoutMillis = from.closeNotifyReadTimeoutMillis;
+		this.builderHashCode = from.builderHashCode;
 	}
 
 	void updateDefaultConfiguration() {
 		switch (type) {
 			case H2:
-				sslContextBuilder.ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+				sslContextBuilder.sslProvider(
+				                     OpenSsl.isAlpnSupported() ?
+				                             io.netty.handler.ssl.SslProvider.OPENSSL :
+				                             io.netty.handler.ssl.SslProvider.JDK)
+				                 .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
 				                 .applicationProtocolConfig(new ApplicationProtocolConfig(
 				                     ApplicationProtocolConfig.Protocol.ALPN,
 				                     ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
 				                     ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
 				                     ApplicationProtocolNames.HTTP_2,
 				                     ApplicationProtocolNames.HTTP_1_1));
-				// deliberate fall through
-			case HTTP11:
-				// deliberate fall through
+				break;
 			case TCP:
-				io.netty.handler.ssl.SslProvider sslProvider =
-						OpenSsl.isAlpnSupported() ? io.netty.handler.ssl.SslProvider.OPENSSL :
-						                            io.netty.handler.ssl.SslProvider.JDK;
-				sslContextBuilder.sslProvider(sslProvider);
+				sslContextBuilder.sslProvider(
+				                     OpenSsl.isAvailable() ?
+				                             io.netty.handler.ssl.SslProvider.OPENSSL :
+				                             io.netty.handler.ssl.SslProvider.JDK);
 				break;
 			case NONE:
 				break; //no default configuration
@@ -431,6 +432,22 @@ public final class SslProvider {
 		return "SslProvider{" + asDetailedString() + "}";
 	}
 
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) {
+			return true;
+		}
+		if (o == null || getClass() != o.getClass()) {
+			return false;
+		}
+		SslProvider that = (SslProvider) o;
+		return builderHashCode == that.builderHashCode;
+	}
+
+	@Override
+	public int hashCode() {
+		return Objects.hash(builderHashCode);
+	}
 
 	static final class Build implements SslContextSpec, DefaultConfigurationSpec, Builder {
 
@@ -439,7 +456,7 @@ public final class SslProvider {
 		 */
 		static final long DEFAULT_SSL_HANDSHAKE_TIMEOUT =
 				Long.parseLong(System.getProperty(
-						SystemPropertiesNames.SSL_HANDSHAKE_TIMEOUT,
+						ReactorNetty.SSL_HANDSHAKE_TIMEOUT,
 						"10000"));
 
 		SslContextBuilder sslCtxBuilder;
@@ -533,6 +550,30 @@ public final class SslProvider {
 		public SslProvider build() {
 			return new SslProvider(this);
 		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			Build build = (Build) o;
+			return handshakeTimeoutMillis == build.handshakeTimeoutMillis &&
+					closeNotifyFlushTimeoutMillis == build.closeNotifyFlushTimeoutMillis &&
+					closeNotifyReadTimeoutMillis == build.closeNotifyReadTimeoutMillis &&
+					Objects.equals(sslCtxBuilder, build.sslCtxBuilder) &&
+					type == build.type &&
+					Objects.equals(sslContext, build.sslContext) &&
+					Objects.equals(handlerConfigurator, build.handlerConfigurator);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(sslCtxBuilder, type, sslContext, handlerConfigurator,
+					handshakeTimeoutMillis, closeNotifyFlushTimeoutMillis, closeNotifyReadTimeoutMillis);
+		}
 	}
 
 	static ServerBootstrap removeSslSupport(ServerBootstrap b) {
@@ -540,7 +581,7 @@ public final class SslProvider {
 		return b;
 	}
 
-	public static ServerBootstrap updateSslSupport(ServerBootstrap b, SslProvider sslProvider) {
+	public static ServerBootstrap setBootstrap(ServerBootstrap b, SslProvider sslProvider) {
 
 		BootstrapHandlers.updateConfiguration(b,
 				NettyPipeline.SslHandler,
@@ -560,6 +601,23 @@ public final class SslProvider {
 		@Override
 		public BiConsumer<ConnectionObserver, Channel> apply(Bootstrap bootstrap) {
 			return new SslSupportConsumer(sslProvider, bootstrap.config().remoteAddress());
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			DeferredSslSupport that = (DeferredSslSupport) o;
+			return Objects.equals(sslProvider, that.sslProvider);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(sslProvider);
 		}
 	}
 

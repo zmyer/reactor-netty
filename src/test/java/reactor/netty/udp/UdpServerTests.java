@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,12 +39,15 @@ import java.util.concurrent.TimeUnit;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.util.NetUtil;
+import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
+import org.testng.Assert;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
+import reactor.netty.ChannelBindException;
 import reactor.netty.Connection;
 import reactor.netty.SocketUtils;
 import reactor.netty.resources.LoopResources;
@@ -117,9 +120,10 @@ public class UdpServerTests {
 			                                   }
 		                                   })
 		                                   .block(Duration.ofSeconds(30));
+		Assertions.assertThat(server).isNotNull();
 
 		assertThat("latch was counted down", latch.await(10, TimeUnit.SECONDS));
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -200,7 +204,7 @@ public class UdpServerTests {
 				latch.getCount() == 0);
 
 		for (Connection s : servers) {
-			s.dispose();
+			s.disposeNow();
 		}
 	}
 
@@ -240,5 +244,26 @@ public class UdpServerTests {
 
 		throw new UnsupportedOperationException(
 				"This test requires a multicast enabled IPv4 network interface, but " + "none" + " " + "were found");
+	}
+
+	@Test
+	public void portBindingException() {
+		Connection conn =
+				UdpServer.create()
+				         .port(0)
+				         .bindNow(Duration.ofSeconds(30));
+
+		try {
+			UdpServer.create()
+			         .addressSupplier(conn::address)
+			         .bindNow(Duration.ofSeconds(30));
+			Assert.fail("illegal-success");
+		}
+		catch (ChannelBindException e) {
+			Assert.assertEquals(e.localPort(), conn.address().getPort());
+			e.printStackTrace();
+		}
+
+		conn.disposeNow();
 	}
 }

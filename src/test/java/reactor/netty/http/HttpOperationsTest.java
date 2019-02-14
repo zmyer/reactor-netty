@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,14 +70,17 @@ public class HttpOperationsTest {
 
 		t = channel.readInbound();
 		assertThat(t, instanceOf(ByteBuf.class));
-		assertThat(((ByteBuf) t).toString(CharsetUtil.UTF_8), is("{\"some\": 1}"));
-		((ByteBuf) t).release();
+		ByteBuf b = (ByteBuf) t;
+		assertThat(b.readCharSequence(b.readableBytes(), CharsetUtil.UTF_8),
+				is("{\"some\": 1}"));
+		b.release();
 
 		t = channel.readInbound();
 		assertThat(t, instanceOf(ByteBuf.class));
-		assertThat(((ByteBuf) t).toString(CharsetUtil.UTF_8),
+		b = (ByteBuf) t;
+		assertThat(b.readCharSequence(b.readableBytes(), CharsetUtil.UTF_8),
 				is("{\"value\": true, \"test\": 1}"));
-		((ByteBuf) t).release();
+		b.release();
 
 		t = channel.readInbound();
 		assertThat(t, is(LastHttpContent.EMPTY_LAST_CONTENT));

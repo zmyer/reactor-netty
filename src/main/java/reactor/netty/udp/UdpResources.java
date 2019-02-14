@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,10 @@ import io.netty.channel.ServerChannel;
 import io.netty.channel.socket.DatagramChannel;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-import reactor.netty.SystemPropertiesNames;
+import reactor.netty.ReactorNetty;
 import reactor.netty.resources.LoopResources;
+import reactor.util.Logger;
+import reactor.util.Loggers;
 
 /**
  * Hold the default UDP resources
@@ -187,9 +189,17 @@ public class UdpResources implements LoopResources {
 			if (resources == null || loops != null) {
 				update = create(resources, loops, name, onNew);
 				if (udpResources.compareAndSet(resources, update)) {
-					if(resources != null){
-						if(loops != null){
-							resources.defaultLoops.dispose();
+					if(resources != null) {
+						if (log.isWarnEnabled()) {
+							log.warn("[{}] resources will use a new LoopResources: {}," +
+									"the previous LoopResources will be disposed", name, loops);
+						}
+						resources.defaultLoops.dispose();
+					}
+					else {
+						String loopType = loops == null ? "default" : "provided";
+						if (log.isDebugEnabled()) {
+							log.debug("[{}] resources will use the {} LoopResources: {}", name, loopType, update.defaultLoops);
 						}
 					}
 					return update;
@@ -204,6 +214,7 @@ public class UdpResources implements LoopResources {
 		}
 	}
 
+	static final Logger                                log = Loggers.getLogger(UdpResources.class);
 	static final AtomicReference<UdpResources>         udpResources;
 	static final Function<LoopResources, UdpResources> ON_UDP_NEW;
 
@@ -212,7 +223,7 @@ public class UdpResources implements LoopResources {
 	 * (but with a minimum value of 4)
 	 */
 	static final int DEFAULT_UDP_THREAD_COUNT = Integer.parseInt(System.getProperty(
-			SystemPropertiesNames.UDP_IO_THREAD_COUNT,
+			ReactorNetty.UDP_IO_THREAD_COUNT,
 			"" + Schedulers.DEFAULT_POOL_SIZE));
 
 	static {

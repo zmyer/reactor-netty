@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,17 +17,18 @@
 package reactor.netty.resources;
 
 import java.io.IOException;
+import java.net.BindException;
 import java.net.SocketAddress;
 import java.util.Objects;
 import java.util.function.Supplier;
 
 import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoSink;
+import reactor.netty.ChannelBindException;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.channel.BootstrapHandlers;
@@ -36,7 +37,7 @@ import reactor.util.Logger;
 import reactor.util.Loggers;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -57,6 +58,11 @@ final class NewConnectionProvider implements ConnectionProvider {
 
 			ConnectionObserver obs = BootstrapHandlers.connectionObserver(bootstrap);
 
+			if (bootstrap.config()
+			             .remoteAddress() != null) {
+				convertLazyRemoteAddress(bootstrap);
+			}
+
 			BootstrapHandlers.finalizeHandler(bootstrap,
 					factory,
 					new NewConnectionObserver(sink, obs));
@@ -64,13 +70,12 @@ final class NewConnectionProvider implements ConnectionProvider {
 			ChannelFuture f;
 			if (bootstrap.config()
 			             .remoteAddress() != null) {
-				convertLazyRemoteAddress(bootstrap);
 				f = bootstrap.connect();
 			}
 			else {
 				f = bootstrap.bind();
 			}
-			DisposableConnect disposableConnect = new DisposableConnect(sink, f);
+			DisposableConnect disposableConnect = new DisposableConnect(sink, f, bootstrap);
 			f.addListener(disposableConnect);
 			sink.onCancel(disposableConnect);
 		});
@@ -103,19 +108,24 @@ final class NewConnectionProvider implements ConnectionProvider {
 
 		final MonoSink<Connection> sink;
 		final ChannelFuture f;
+		final Bootstrap bootstrap;
 
 
-		DisposableConnect(MonoSink<Connection> sink, ChannelFuture f) {
+		DisposableConnect(MonoSink<Connection> sink, ChannelFuture f, Bootstrap
+				bootstrap) {
 			this.sink = sink;
 			this.f = f;
+			this.bootstrap = bootstrap;
 		}
 
 		@Override
+		@SuppressWarnings("FutureReturnValueIgnored")
 		public final void dispose() {
 			if (isDisposed()) {
 				return;
 			}
 
+			// Returned value is deliberately ignored
 			f.removeListener(this);
 
 			if (!f.isDone()) {
@@ -137,8 +147,18 @@ final class NewConnectionProvider implements ConnectionProvider {
 					}
 					return;
 				}
-				if (f.cause() != null) {
-					sink.error(f.cause());
+				Throwable cause = f.cause();
+				if (cause != null) {
+					if (cause instanceof BindException ||
+							// With epoll/kqueue transport it is
+							// io.netty.channel.unix.Errors$NativeIoException: bind(..) failed: Address already in use
+							(cause instanceof IOException && cause.getMessage() != null &&
+									cause.getMessage().contains("Address already in use"))) {
+						sink.error(ChannelBindException.fail(bootstrap, null));
+					}
+					else {
+						sink.error(cause);
+					}
 				}
 				else {
 					sink.error(new IOException("error while connecting to " + f.channel()));
@@ -150,29 +170,6 @@ final class NewConnectionProvider implements ConnectionProvider {
 					log.debug(format(f.channel(), "Connected new channel"));
 				}
 			}
-		}
-	}
-
-	static final class NewConnection implements Connection {
-		final Channel channel;
-
-		NewConnection(Channel channel) {
-			this.channel = channel;
-		}
-
-		@Override
-		public Channel channel() {
-			return channel;
-		}
-
-		@Override
-		public boolean isPersistent() {
-			return false;
-		}
-
-		@Override
-		public String toString() {
-			return "NewConnection{" + "channel=" + channel + '}';
 		}
 	}
 
@@ -210,7 +207,6 @@ final class NewConnectionProvider implements ConnectionProvider {
 
 		@Override
 		public void onUncaughtException(Connection c, Throwable error) {
-			log.error(format(c.channel(), "onUncaughtException(" + c + ")"), error);
 			sink.error(error);
 			obs.onUncaughtException(c, error);
 		}

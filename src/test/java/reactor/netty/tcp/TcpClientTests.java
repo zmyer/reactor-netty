@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,9 +25,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -44,10 +47,14 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import reactor.netty.Connection;
+import reactor.netty.DisposableServer;
 import reactor.netty.SocketUtils;
 import reactor.netty.channel.AbortedException;
+import reactor.netty.channel.ChannelOperations;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.resources.LoopResources;
+import reactor.test.StepVerifier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -63,50 +70,58 @@ public class TcpClientTests {
 	private final ExecutorService threadPool = Executors.newCachedThreadPool();
 	int                     echoServerPort;
 	EchoServer              echoServer;
+	Future<?>               echoServerFuture;
 	int                     abortServerPort;
 	ConnectionAbortServer   abortServer;
+	Future<?>               abortServerFuture;
 	int                     timeoutServerPort;
 	ConnectionTimeoutServer timeoutServer;
+	Future<?>               timeoutServerFuture;
 	int                     heartbeatServerPort;
 	HeartbeatServer         heartbeatServer;
+	Future<?>               heartbeatServerFuture;
 
 	@Before
 	public void setup() throws Exception {
 		echoServerPort = SocketUtils.findAvailableTcpPort();
 		echoServer = new EchoServer(echoServerPort);
-		threadPool.submit(echoServer);
+		echoServerFuture = threadPool.submit(echoServer);
 		if(!echoServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("fail to start test server");
 		}
 
 		abortServerPort = SocketUtils.findAvailableTcpPort();
 		abortServer = new ConnectionAbortServer(abortServerPort);
-		threadPool.submit(abortServer);
+		abortServerFuture = threadPool.submit(abortServer);
 		if(!abortServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("fail to start test server");
 		}
 
 		timeoutServerPort = SocketUtils.findAvailableTcpPort();
 		timeoutServer = new ConnectionTimeoutServer(timeoutServerPort);
-		threadPool.submit(timeoutServer);
+		timeoutServerFuture = threadPool.submit(timeoutServer);
 		if(!timeoutServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("fail to start test server");
 		}
 
 		heartbeatServerPort = SocketUtils.findAvailableTcpPort();
 		heartbeatServer = new HeartbeatServer(heartbeatServerPort);
-		threadPool.submit(heartbeatServer);
+		heartbeatServerFuture = threadPool.submit(heartbeatServer);
 		if(!heartbeatServer.await(10, TimeUnit.SECONDS)){
 			throw new IOException("fail to start test server");
 		}
 	}
 
 	@After
-	public void cleanup() throws InterruptedException, IOException {
+	public void cleanup() throws Exception {
 		echoServer.close();
 		abortServer.close();
 		timeoutServer.close();
 		heartbeatServer.close();
+		assertNull(echoServerFuture.get());
+		assertNull(abortServerFuture.get());
+		assertNull(timeoutServerFuture.get());
+		assertNull(heartbeatServerFuture.get());
 		threadPool.shutdown();
 		threadPool.awaitTermination(5, TimeUnit.SECONDS);
 		Thread.sleep(500);
@@ -136,14 +151,34 @@ public class TcpClientTests {
 			                               return out.sendString(Flux.just("Hello World!"))
 			                                  .neverComplete();
 		                               })
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		latch.await(30, TimeUnit.SECONDS);
 
-		client.dispose();
+		client.disposeNow();
 
 		assertThat("latch was counted down", latch.getCount(), is(0L));
+	}
+
+
+	@Test
+	public void testTcpClient1ThreadAcquire() {
+
+		LoopResources resources = LoopResources.create("test", 1, true);
+
+
+		Connection client = TcpClient.create()
+		                             .host("localhost")
+		                             .port(echoServerPort)
+		                             .runOn(resources)
+		                             .wiretap(true)
+		                             .connectNow();
+
+		client.disposeNow();
+		resources.dispose();
+
+		assertThat("client was configured", client instanceof ChannelOperations);
 	}
 
 	@Test
@@ -160,12 +195,12 @@ public class TcpClientTests {
 			return out.sendString(Flux.just("Hello"))
 			   .neverComplete();
 		})
-		                     .wiretap()
+		                     .wiretap(true)
 		                     .connectNow(Duration.ofSeconds(5));
 
 		latch.await(5, TimeUnit.SECONDS);
 
-		s.dispose();
+		s.disposeNow();
 
 		assertThat("latch was counted down", latch.getCount(), is(0L));
 	}
@@ -195,7 +230,7 @@ public class TcpClientTests {
 						                     latch.countDown();
 					                     }).then())
 				         )
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow(Duration.ofSeconds(15));
 
 		assertTrue("Expected messages not received. Received " + strings.size() + " messages: " + strings,
@@ -257,7 +292,7 @@ public class TcpClientTests {
 						                     latch.countDown();
 					                     }).then())
 				         )
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow(Duration.ofSeconds(30));
 
 		System.out.println("Connected");
@@ -280,7 +315,7 @@ public class TcpClientTests {
 				         .port(abortServerPort);
 
 		client.handle((in, out) -> Mono.empty())
-		      .wiretap()
+		      .wiretap(true)
 		      .connectNow()
 		      .disposeNow();
 	}
@@ -292,7 +327,7 @@ public class TcpClientTests {
 		final AtomicLong totalDelay = new AtomicLong();
 
 		client.handle((in, out) -> Mono.never())
-		         .wiretap()
+		         .wiretap(true)
 		         .connect()
 		         .retryWhen(errors -> errors.zipWith(Flux.range(1, 4), (a, b) -> b)
 		                                    .flatMap(attempt -> {
@@ -362,7 +397,7 @@ public class TcpClientTests {
 				  .subscribe();
 				return Flux.never();
 			})
-			.wiretap()
+			.wiretap(true)
 			.connect();
 
 			handler.log()
@@ -416,7 +451,7 @@ public class TcpClientTests {
 		             .connectNow();
 
 		assertTrue("Cancel not propagated", connectionLatch.await(30, TimeUnit.SECONDS));
-		c.dispose();
+		c.disposeNow();
 	}
 
 	@Ignore
@@ -444,13 +479,13 @@ public class TcpClientTests {
 			           .then()
 			           .log();
 		})
-		                     .wiretap()
+		                     .wiretap(true)
 		                     .connectNow();
 
 		assertTrue("latch was counted down", latch.await(5, TimeUnit.SECONDS));
 		assertTrue("close was counted down", close.await(30, TimeUnit.SECONDS));
 		assertThat("totalDelay was >500ms", totalDelay.get(), greaterThanOrEqualTo(500L));
-		s.dispose();
+		s.disposeNow();
 	}
 
 	@Test
@@ -467,7 +502,7 @@ public class TcpClientTests {
 			in.withConnection(c -> c.onReadIdle(500, latch::countDown));
 			return Flux.never();
 		})
-		                     .wiretap()
+		                     .wiretap(true)
 		                     .connectNow();
 
 		assertTrue(latch.await(15, TimeUnit.SECONDS));
@@ -476,7 +511,7 @@ public class TcpClientTests {
 		long duration = System.currentTimeMillis() - start;
 
 		assertThat(duration, is(greaterThanOrEqualTo(500L)));
-		s.dispose();
+		s.disposeNow();
 	}
 
 	@Test
@@ -500,7 +535,7 @@ public class TcpClientTests {
 			                               }
 			                               return Flux.merge(allWrites);
 		                               })
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		System.out.println("Started");
@@ -510,13 +545,13 @@ public class TcpClientTests {
 		long duration = System.currentTimeMillis() - start;
 
 		assertThat(duration, is(greaterThanOrEqualTo(500L)));
-		client.dispose();
+		client.disposeNow();
 	}
 
 	@Test
 	public void nettyNetChannelAcceptsNettyChannelHandlers() throws InterruptedException {
 		HttpClient client = HttpClient.create()
-		                              .wiretap();
+		                              .wiretap(true);
 
 		final CountDownLatch latch = new CountDownLatch(1);
 		System.out.println(client.get()
@@ -738,4 +773,59 @@ public class TcpClientTests {
 		}
 	}
 
+
+	@Test
+	public void testIssue600_1() {
+		doTestIssue600(true);
+	}
+
+	@Test
+	public void testIssue600_2() {
+		doTestIssue600(false);
+	}
+
+	private void doTestIssue600(boolean withLoop) {
+		DisposableServer server =
+				TcpServer.create()
+				         .port(0)
+				         .handle((req, res) -> res.send(req.receive()
+				                                           .retain()
+				                                           .delaySubscription(Duration.ofSeconds(1))))
+				         .wiretap(true)
+				         .bindNow();
+
+		ConnectionProvider pool = ConnectionProvider.fixed("test", 10);
+		LoopResources loop = LoopResources.create("test", 4, true);
+		TcpClient client;
+		if (withLoop) {
+			client =
+					TcpClient.create(pool)
+					         .addressSupplier(server::address)
+					         .runOn(loop);
+		}
+		else {
+			client =
+					TcpClient.create(pool)
+					         .addressSupplier(server::address);
+		}
+
+		Set<String> threadNames = new ConcurrentSkipListSet<>();
+		StepVerifier.create(
+				Flux.range(1,4)
+				    .flatMap(i ->
+				            client.handle((in, out) -> {
+				                threadNames.add(Thread.currentThread().getName());
+				                return out.send(Flux.empty());
+				            })
+				            .connect()))
+		            .expectNextCount(4)
+		            .expectComplete()
+		            .verify(Duration.ofSeconds(30));
+
+		pool.dispose();
+		loop.dispose();
+		server.disposeNow();
+
+		Assertions.assertThat(threadNames.size()).isGreaterThan(1);
+	}
 }

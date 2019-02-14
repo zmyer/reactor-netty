@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 package reactor.netty.http.client;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -24,7 +23,10 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import javax.annotation.Nullable;
@@ -50,13 +52,14 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.cookie.ClientCookieDecoder;
 import io.netty.handler.codec.http.cookie.ClientCookieEncoder;
 import io.netty.handler.codec.http.cookie.Cookie;
 import io.netty.handler.codec.http.multipart.DefaultHttpDataFactory;
 import io.netty.handler.codec.http.multipart.HttpDataFactory;
 import io.netty.handler.codec.http.multipart.HttpPostRequestEncoder;
+import io.netty.handler.codec.http.websocketx.extensions.compression.WebSocketClientCompressionHandler;
 import io.netty.handler.stream.ChunkedWriteHandler;
-import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import org.reactivestreams.Publisher;
 import reactor.core.CoreSubscriber;
@@ -77,7 +80,7 @@ import reactor.netty.http.HttpOperations;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -86,16 +89,19 @@ import static reactor.netty.LogFormatter.format;
 class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		implements HttpClientResponse, HttpClientRequest {
 
-	final Supplier<String>[]    redirectedFrom;
 	final boolean               isSecure;
 	final HttpRequest           nettyRequest;
 	final HttpHeaders           requestHeaders;
+	final ClientCookieEncoder   cookieEncoder;
+	final ClientCookieDecoder   cookieDecoder;
+
+	Supplier<String>[]    redirectedFrom = EMPTY_REDIRECTIONS;
 
 	volatile ResponseState responseState;
 
 	boolean started;
 
-	boolean redirectable;
+	BiPredicate<HttpClientRequest, HttpClientResponse> followRedirectPredicate;
 
 	HttpClientOperations(HttpClientOperations replaced) {
 		super(replaced);
@@ -104,29 +110,28 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		this.isSecure = replaced.isSecure;
 		this.nettyRequest = replaced.nettyRequest;
 		this.responseState = replaced.responseState;
-		this.redirectable = replaced.redirectable;
+		this.followRedirectPredicate = replaced.followRedirectPredicate;
 		this.requestHeaders = replaced.requestHeaders;
+		this.cookieEncoder = replaced.cookieEncoder;
+		this.cookieDecoder = replaced.cookieDecoder;
 	}
 
-	HttpClientOperations(Connection c, ConnectionObserver listener) {
+	HttpClientOperations(Connection c, ConnectionObserver listener, ClientCookieEncoder encoder, ClientCookieDecoder decoder) {
 		super(c, listener);
 		this.isSecure = c.channel()
 		                 .pipeline()
 		                 .get(NettyPipeline.SslHandler) != null;
-		Supplier<String>[] redirects = c.channel()
-		                                .attr(REDIRECT_ATTR_KEY)
-		                                .get();
-		this.redirectedFrom = redirects == null ? EMPTY_REDIRECTIONS : redirects;
-		this.nettyRequest =
-				new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/");
+		this.nettyRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/");
 		this.requestHeaders = nettyRequest.headers();
+		this.cookieDecoder = decoder;
+		this.cookieEncoder = encoder;
 	}
 
 	@Override
 	public HttpClientRequest addCookie(Cookie cookie) {
 		if (!hasSentHeaders()) {
 			this.requestHeaders.add(HttpHeaderNames.COOKIE,
-					ClientCookieEncoder.STRICT.encode(cookie));
+					cookieEncoder.encode(cookie));
 		}
 		else {
 			throw new IllegalStateException("Status and headers already sent");
@@ -165,7 +170,9 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	}
 
 	@Override
+	@SuppressWarnings("FutureReturnValueIgnored")
 	public HttpClientOperations addHandler(String name, ChannelHandler handler) {
+		// Returned value is deliberately ignored
 		super.addHandler(name, handler);
 		return this;
 	}
@@ -215,14 +222,14 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	@Override
 	public Map<CharSequence, Set<Cookie>> cookies() {
 		ResponseState responseState = this.responseState;
-		if (responseState != null) {
+		if (responseState != null && responseState.cookieHolder != null) {
 			return responseState.cookieHolder.getCachedCookies();
 		}
 		return Collections.emptyMap();
 	}
 
-	public void followRedirect(boolean redirectable) {
-		this.redirectable = redirectable;
+	void followRedirectPredicate(BiPredicate<HttpClientRequest, HttpClientResponse> predicate) {
+		this.followRedirectPredicate = predicate;
 	}
 
 	@Override
@@ -238,11 +245,17 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		if (isInboundCancelled() || isInboundDisposed()) {
 			return;
 		}
+		listener().onStateChange(this, HttpClientState.RESPONSE_INCOMPLETE);
 		if (responseState == null) {
-			listener().onUncaughtException(this, new IOException("Connection closed prematurely"));
+			if (markSentBody()) {
+				listener().onUncaughtException(this, PrematureCloseException.BEFORE_RESPONSE_SENDING_REQUEST);
+			}
+			else {
+				listener().onUncaughtException(this, PrematureCloseException.BEFORE_RESPONSE);
+			}
 			return;
 		}
-		super.onInboundError(new IOException("Connection closed prematurely"));
+		super.onInboundError(PrematureCloseException.DURING_RESPONSE);
 	}
 
 	@Override
@@ -282,7 +295,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 
 	@Override
 	public boolean isFollowRedirect() {
-		return redirectable && redirectedFrom.length <= MAX_REDIRECTS;
+		return followRedirectPredicate != null && redirectedFrom.length <= MAX_REDIRECTS;
 	}
 
 	@Override
@@ -298,12 +311,6 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	public boolean isWebsocket() {
 		ChannelOperations<?, ?> ops = get(channel());
 		return ops != null && ops.getClass().equals(WebsocketClientOperations.class);
-	}
-
-	@Override
-	public HttpClientRequest keepAlive(boolean keepAlive) {
-		HttpUtil.setKeepAlive(nettyRequest, keepAlive);
-		return this;
 	}
 
 	@Override
@@ -344,20 +351,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	@Override
 	public NettyOutbound send(Publisher<? extends ByteBuf> source) {
 		if (Objects.equals(method(), HttpMethod.GET) || Objects.equals(method(), HttpMethod.HEAD)) {
-			ByteBufAllocator alloc = channel().alloc();
-			return then(Flux.from(source)
-			                .doOnNext(ByteBuf::retain)
-			                .collect(alloc::buffer, ByteBuf::writeBytes)
-			                .flatMapMany(agg -> {
-			                        if (!hasSentHeaders() &&
-			                                !HttpUtil.isTransferEncodingChunked(outboundHttpMessage()) &&
-			                                !HttpUtil.isContentLengthSet(outboundHttpMessage())) {
-			                            outboundHttpMessage().headers()
-			                                                 .setInt(HttpHeaderNames.CONTENT_LENGTH,
-			                                                         agg.readableBytes());
-			                        }
-			                        return super.send(Mono.just(agg)).then();
-			                }));
+			return new GetOrHeadAggregateOutbound(this, source, outboundHttpMessage());
 		}
 		return super.send(source);
 	}
@@ -376,7 +370,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 			}
 		}
 		catch (URISyntaxException e) {
-			throw Exceptions.bubble(e);
+			throw new IllegalArgumentException(e);
 		}
 		return uri;
 	}
@@ -429,7 +423,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		else if (markSentBody()) {
 			channel().writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
 		}
-		listener().onStateChange(this, REQUEST_SENT);
+		listener().onStateChange(this, HttpClientState.REQUEST_SENT);
 		channel().read();
 	}
 
@@ -457,6 +451,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 			            .isFailure()) {
 				onInboundError(response.decoderResult()
 				                       .cause());
+				ReferenceCountUtil.release(msg);
 				return;
 			}
 			if (started) {
@@ -465,6 +460,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 							response.headers()
 							        .toString());
 				}
+				ReferenceCountUtil.release(msg);
 				return;
 			}
 			started = true;
@@ -488,7 +484,14 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 			}
 
 			if (notRedirected(response)) {
-				listener().onStateChange(this, RESPONSE_RECEIVED);
+				try {
+					listener().onStateChange(this, HttpClientState.RESPONSE_RECEIVED);
+				}
+				catch (Exception e) {
+					onInboundError(e);
+					ReferenceCountUtil.release(msg);
+					return;
+				}
 			}
 			if (msg instanceof FullHttpResponse) {
 				super.onInboundNext(ctx, msg);
@@ -502,6 +505,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 					log.debug(format(channel(), "HttpClientOperations received an incorrect end " +
 							"delimiter (previously used connection?)"));
 				}
+				ReferenceCountUtil.release(msg);
 				return;
 			}
 			if (log.isDebugEnabled()) {
@@ -528,6 +532,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 								"(previously used connection?)"),
 						msg);
 			}
+			ReferenceCountUtil.release(msg);
 			return;
 		}
 		super.onInboundNext(ctx, msg);
@@ -539,16 +544,14 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	}
 
 	final boolean notRedirected(HttpResponse response) {
-		int code = response.status()
-		                   .code();
-		if ((code == 301 || code == 302) && isFollowRedirect()) {
+		if (isFollowRedirect() && followRedirectPredicate.test(this, this)) {
 			if (log.isDebugEnabled()) {
 				log.debug(format(channel(), "Received redirect location: {}"),
 						response.headers()
 						        .entries()
 						        .toString());
 			}
-			listener().onUncaughtException(this, new RedirectClientException(response));
+			listener().onUncaughtException(this, new RedirectClientException(response.headers()));
 			return false;
 		}
 		return true;
@@ -582,17 +585,28 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		ResponseState state = responseState;
 		if (state == null) {
 			this.responseState =
-					new ResponseState(nettyResponse, nettyResponse.headers());
+					new ResponseState(nettyResponse, nettyResponse.headers(), cookieDecoder);
 		}
 	}
 
-	final void withWebsocketSupport(String protocols) {
+	@SuppressWarnings("FutureReturnValueIgnored")
+	final void withWebsocketSupport(String protocols, int maxFramePayloadLength, boolean compress) {
 		URI url = websocketUri();
 		//prevent further header to be sent for handshaking
 		if (markSentHeaders()) {
+			// Returned value is deliberately ignored
 			addHandlerFirst(NettyPipeline.HttpAggregator, new HttpObjectAggregator(8192));
 
-			WebsocketClientOperations ops = new WebsocketClientOperations(url, protocols, this);
+			if (compress) {
+				requestHeaders().remove(HttpHeaderNames.ACCEPT_ENCODING);
+				// Returned value is deliberately ignored
+				removeHandler(NettyPipeline.HttpDecompressor);
+				// Returned value is deliberately ignored
+				addHandlerFirst(NettyPipeline.WsCompressionHandler,
+				                WebSocketClientCompressionHandler.INSTANCE);
+			}
+
+			WebsocketClientOperations ops = new WebsocketClientOperations(url, protocols, maxFramePayloadLength, this);
 
 			if(!rebind(ops)) {
 				log.error(format(channel(), "Error while rebinding websocket in channel attribute: " +
@@ -607,10 +621,10 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		final HttpHeaders  headers;
 		final Cookies      cookieHolder;
 
-		ResponseState(HttpResponse response, HttpHeaders headers) {
+		ResponseState(HttpResponse response, HttpHeaders headers, ClientCookieDecoder decoder) {
 			this.response = response;
 			this.headers = headers;
-			this.cookieHolder = Cookies.newClientResponseHolder(headers);
+			this.cookieHolder = Cookies.newClientResponseHolder(headers, decoder);
 		}
 	}
 
@@ -647,7 +661,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 		void _subscribe(CoreSubscriber<? super Void> s) {
 			if (!parent.markSentHeaders()) {
 				Operators.error(s,
-						new IllegalStateException("headers have already " + "been sent"));
+						new IllegalStateException("headers have already been sent"));
 				return;
 			}
 
@@ -669,6 +683,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 					parent.chunkedTransfer(false);
 				}
 
+				// Returned value is deliberately ignored
 				parent.addHandlerFirst(NettyPipeline.ChunkedWriter, new ChunkedWriteHandler());
 
 				boolean chunked = HttpUtil.isTransferEncodingChunked(parent.nettyRequest);
@@ -710,7 +725,7 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 
 			}
 			catch (Throwable e) {
-				Exceptions.throwIfFatal(e);
+				Exceptions.throwIfJvmFatal(e);
 				df.cleanRequestHttpData(parent.nettyRequest);
 				Operators.error(s, Exceptions.unwrap(e));
 			}
@@ -722,21 +737,64 @@ class HttpClientOperations extends HttpOperations<NettyInbound, NettyOutbound>
 	static final Supplier<String>[]     EMPTY_REDIRECTIONS = (Supplier<String>[])new Supplier[0];
 	static final Logger                 log                =
 			Loggers.getLogger(HttpClientOperations.class);
-	static final AttributeKey<Supplier<String>[]> REDIRECT_ATTR_KEY  =
-			AttributeKey.newInstance("httpRedirects");
 
-	static final ConnectionObserver.State REQUEST_SENT = new ConnectionObserver.State() {
-		@Override
-		public String toString() {
-			return "[request_sent]";
-		}
-	};
-	static final ConnectionObserver.State RESPONSE_RECEIVED = new ConnectionObserver.State
-			() {
-		@Override
-		public String toString() {
-			return "[response_received]";
-		}
-	};
+	static final class GetOrHeadAggregateOutbound implements NettyOutbound {
 
+		final HttpOperations<?, ?>         parent;
+		final HttpMessage                  request;
+		final Publisher<? extends ByteBuf> source;
+
+		 GetOrHeadAggregateOutbound(HttpOperations<?, ?> parent,
+				Publisher<? extends ByteBuf> source,
+				 HttpMessage request) {
+			this.parent = parent;
+			this.source = source;
+			this.request = request;
+		}
+
+		@Override
+		public ByteBufAllocator alloc() {
+			return parent.alloc();
+		}
+
+		@Override
+		public NettyOutbound sendObject(Publisher<?> dataStream) {
+			return parent.sendObject(dataStream);
+		}
+
+		@Override
+		public NettyOutbound sendObject(Object message) {
+			return parent.sendObject(message);
+		}
+
+		@Override
+		public <S> NettyOutbound sendUsing(Callable<? extends S> sourceInput,
+				BiFunction<? super Connection, ? super S, ?> mappedInput, Consumer<? super S> sourceCleanup) {
+			return parent.sendUsing(sourceInput, mappedInput, sourceCleanup);
+		}
+
+		@Override
+		public Mono<Void> then() {
+			ByteBufAllocator alloc = parent.channel().alloc();
+			return Flux.from(source)
+			           .collect(alloc::heapBuffer, ByteBuf::writeBytes)
+			           .flatMap(agg -> {
+				           if (!HttpUtil.isTransferEncodingChunked(request) && !HttpUtil.isContentLengthSet(request)) {
+					           request.headers()
+					                  .setInt(HttpHeaderNames.CONTENT_LENGTH, agg.readableBytes());
+				           }
+				           if (agg.readableBytes() > 0) {
+				               return parent.then().thenEmpty(FutureMono.disposableWriteAndFlush(parent.channel(), Mono.just(agg)));
+				           }
+				           agg.release();
+				           return parent.then();
+			           })
+			           .doOnDiscard(ByteBuf.class, ByteBuf::release);
+		}
+
+		@Override
+		public NettyOutbound withConnection(Consumer<? super Connection> withConnection) {
+			return parent.withConnection(withConnection);
+		}
+	}
 }

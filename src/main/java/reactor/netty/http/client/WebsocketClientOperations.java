@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import java.net.URI;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.FullHttpResponse;
@@ -33,15 +32,16 @@ import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakerFactory;
-import io.netty.handler.codec.http.websocketx.WebSocketHandshakeException;
 import io.netty.handler.codec.http.websocketx.WebSocketVersion;
 import reactor.core.publisher.Mono;
 import reactor.netty.FutureMono;
+import reactor.netty.NettyPipeline;
+import reactor.netty.ReactorNetty;
 import reactor.netty.http.websocket.WebsocketInbound;
 import reactor.netty.http.websocket.WebsocketOutbound;
 import reactor.util.annotation.Nullable;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -56,6 +56,7 @@ final class WebsocketClientOperations extends HttpClientOperations
 
 	WebsocketClientOperations(URI currentURI,
 			String protocols,
+			int maxFramePayloadLength,
 			HttpClientOperations replaced) {
 		super(replaced);
 		Channel channel = channel();
@@ -65,7 +66,8 @@ final class WebsocketClientOperations extends HttpClientOperations
 					protocols.isEmpty() ? null : protocols,
 					true,
 					replaced.requestHeaders()
-					        .remove(HttpHeaderNames.HOST));
+					        .remove(HttpHeaderNames.HOST),
+					maxFramePayloadLength);
 
 		handshaker.handshake(channel)
 		          .addListener(f -> {
@@ -105,10 +107,10 @@ final class WebsocketClientOperations extends HttpClientOperations
 
 				try {
 					handshaker.finishHandshake(channel(), response);
-					listener().onStateChange(this, RESPONSE_RECEIVED);
+					listener().onStateChange(this, HttpClientState.RESPONSE_RECEIVED);
 				}
-				catch (WebSocketHandshakeException wshe) {
-					onInboundError(wshe);
+				catch (Exception e) {
+					onInboundError(e);
 				}
 				finally {
 					//Release unused content (101 status)
@@ -186,14 +188,19 @@ final class WebsocketClientOperations extends HttpClientOperations
 
 	Mono<Void> sendClose(CloseWebSocketFrame frame) {
 		if (CLOSE_SENT.get(this) == 0) {
+			onTerminate().subscribe(null, null, () -> ReactorNetty.safeRelease(frame));
 			return FutureMono.deferFuture(() -> {
 				if (CLOSE_SENT.getAndSet(this, 1) == 0) {
+					discard();
+					channel().pipeline().remove(NettyPipeline.ReactiveBridge);
 					return channel().writeAndFlush(frame)
 					                .addListener(ChannelFutureListener.CLOSE);
 				}
+				frame.release();
 				return channel().newSucceededFuture();
 			});
 		}
+		frame.release();
 		return Mono.empty();
 	}
 
@@ -203,9 +210,11 @@ final class WebsocketClientOperations extends HttpClientOperations
 			return;
 		}
 		if (CLOSE_SENT.getAndSet(this, 1) == 0) {
-			ChannelFuture f = channel().writeAndFlush(
-					frame == null ? new CloseWebSocketFrame() : frame);
-			f.addListener(ChannelFutureListener.CLOSE);
+			channel().writeAndFlush(frame == null ? new CloseWebSocketFrame() : frame)
+			         .addListener(ChannelFutureListener.CLOSE);
+		}
+		else if (frame != null) {
+			frame.release();
 		}
 	}
 

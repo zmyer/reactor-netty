@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,14 +32,17 @@ import io.netty.util.NetUtil;
 import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoSink;
+import reactor.netty.ChannelBindException;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.DisposableServer;
+import reactor.netty.channel.AbortedException;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.channel.ChannelOperations;
+import reactor.netty.http.HttpResources;
 import reactor.netty.resources.LoopResources;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -59,7 +62,7 @@ final class TcpServerBind extends TcpServer {
 		SslProvider ssl = SslProvider.findSslSupport(b);
 		if (ssl != null && ssl.getDefaultConfigurationType() == null) {
 			ssl = SslProvider.updateDefaultConfiguration(ssl, SslProvider.DefaultConfigurationType.TCP);
-			SslProvider.updateSslSupport(b, ssl);
+			SslProvider.setBootstrap(b, ssl);
 		}
 
 		if (b.config()
@@ -83,7 +86,7 @@ final class TcpServerBind extends TcpServer {
 
 			ChannelFuture f = bootstrap.bind();
 
-			DisposableBind disposableServer = new DisposableBind(sink, f, obs);
+			DisposableBind disposableServer = new DisposableBind(sink, f, obs, bootstrap);
 			f.addListener(disposableServer);
 			sink.onCancel(disposableServer);
 		});
@@ -131,9 +134,7 @@ final class TcpServerBind extends TcpServer {
 				.childOption(ChannelOption.SO_KEEPALIVE, true)
 				.childOption(ChannelOption.TCP_NODELAY, true)
 				.childOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, 30000)
-				.localAddress(
-						InetSocketAddressUtil.createUnresolved(NetUtil.LOCALHOST.getHostAddress(),
-								DEFAULT_PORT));
+				.localAddress(new InetSocketAddress(DEFAULT_PORT));
 	}
 
 	static final class DisposableBind
@@ -141,17 +142,21 @@ final class TcpServerBind extends TcpServer {
 
 		final MonoSink<DisposableServer> sink;
 		final ChannelFuture              f;
+		final ServerBootstrap            bootstrap;
 		final ConnectionObserver         selectorObserver;
 
 		DisposableBind(MonoSink<DisposableServer> sink, ChannelFuture f,
-				ConnectionObserver selectorObserver) {
+				ConnectionObserver selectorObserver,
+				ServerBootstrap bootstrap) {
 			this.sink = sink;
+			this.bootstrap = bootstrap;
 			this.f = f;
 			this.selectorObserver = selectorObserver;
 		}
 
 		@Override
 		public final void dispose() {
+			// Returned value is deliberately ignored
 			f.removeListener(this);
 
 			if (f.channel()
@@ -159,6 +164,10 @@ final class TcpServerBind extends TcpServer {
 
 				f.channel()
 				 .close();
+
+				HttpResources.get()
+				             .disposeWhen(bootstrap.config()
+				                                   .localAddress());
 			}
 			else if (!f.isDone()) {
 				f.cancel(true);
@@ -179,12 +188,7 @@ final class TcpServerBind extends TcpServer {
 					}
 					return;
 				}
-				if (f.cause() != null) {
-					sink.error(f.cause());
-				}
-				else {
-					sink.error(new IOException("error while binding to " + f.channel()));
-				}
+				sink.error(ChannelBindException.fail(bootstrap, f.cause()));
 			}
 			else {
 				if (log.isDebugEnabled()) {
@@ -206,7 +210,15 @@ final class TcpServerBind extends TcpServer {
 
 		@Override
 		public void onUncaughtException(Connection connection, Throwable error) {
-			log.error(format(connection.channel(), "onUncaughtException(" + connection + ")"), error);
+			ChannelOperations ops = ChannelOperations.get(connection.channel());
+			if (ops == null && (error instanceof IOException || AbortedException.isConnectionReset(error))) {
+				if (log.isDebugEnabled()) {
+					log.debug(format(connection.channel(), "onUncaughtException(" + connection + ")"), error);
+				}
+			}
+			else {
+				log.error(format(connection.channel(), "onUncaughtException(" + connection + ")"), error);
+			}
 			connection.dispose();
 		}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package reactor.netty.http.client;
 import java.util.Objects;
 
 import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpHeaders;
 
 /**
  * An error for signalling that an error occurred during a communication over HTTP version
@@ -29,9 +29,8 @@ final class RedirectClientException extends RuntimeException {
 
 	final String location;
 
-	RedirectClientException(HttpResponse response) {
-		location = Objects.requireNonNull(response.headers()
-		                                          .get(HttpHeaderNames.LOCATION));
+	RedirectClientException(HttpHeaders headers) {
+		location = Objects.requireNonNull(headers.get(HttpHeaderNames.LOCATION));
 	}
 
 	@Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultLastHttpContent;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.cookie.ClientCookieDecoder;
+import io.netty.handler.codec.http.cookie.ClientCookieEncoder;
 import io.netty.handler.codec.json.JsonObjectDecoder;
 import io.netty.util.CharsetUtil;
 import org.junit.Test;
@@ -42,10 +44,9 @@ public class HttpClientOperationsTest {
 	public void addDecoderReplaysLastHttp() {
 		ByteBuf buf = Unpooled.copiedBuffer("{\"foo\":1}", CharsetUtil.UTF_8);
 		EmbeddedChannel channel = new EmbeddedChannel();
-		HttpClientOperations ops = new HttpClientOperations(() -> channel,
-				ConnectionObserver.emptyListener());
-
-		ops.addHandler(new JsonObjectDecoder());
+		HttpClientOperations ops = new HttpClientOperations(() -> channel, ConnectionObserver.emptyListener(),
+				ClientCookieEncoder.STRICT, ClientCookieDecoder.STRICT)
+				.addHandler(new JsonObjectDecoder());
 		channel.writeInbound(new DefaultLastHttpContent(buf));
 
 		assertThat(channel.pipeline().names().iterator().next(), is("JsonObjectDecoder$extractor"));
@@ -65,10 +66,9 @@ public class HttpClientOperationsTest {
 	public void addNamedDecoderReplaysLastHttp() {
 		ByteBuf buf = Unpooled.copiedBuffer("{\"foo\":1}", CharsetUtil.UTF_8);
 		EmbeddedChannel channel = new EmbeddedChannel();
-		HttpClientOperations ops = new HttpClientOperations(() -> channel,
-				ConnectionObserver.emptyListener());
-
-		ops.addHandler("json", new JsonObjectDecoder());
+		HttpClientOperations ops = new HttpClientOperations(() -> channel, ConnectionObserver.emptyListener(),
+				ClientCookieEncoder.STRICT, ClientCookieDecoder.STRICT)
+				.addHandler("json", new JsonObjectDecoder());
 		channel.writeInbound(new DefaultLastHttpContent(buf));
 
 		assertThat(channel.pipeline().names().iterator().next(), is("json$extractor"));
@@ -88,10 +88,9 @@ public class HttpClientOperationsTest {
 	public void addEncoderReplaysLastHttp() {
 		ByteBuf buf = Unpooled.copiedBuffer("{\"foo\":1}", CharsetUtil.UTF_8);
 		EmbeddedChannel channel = new EmbeddedChannel();
-		HttpClientOperations ops = new HttpClientOperations(() -> channel,
-				ConnectionObserver.emptyListener());
-
-		ops.addHandler(new JsonObjectDecoder());
+		HttpClientOperations ops = new HttpClientOperations(() -> channel, ConnectionObserver.emptyListener(),
+				ClientCookieEncoder.STRICT, ClientCookieDecoder.STRICT)
+				.addHandler(new JsonObjectDecoder());
 		channel.writeInbound(new DefaultLastHttpContent(buf));
 
 		assertThat(channel.pipeline().names().iterator().next(), is("JsonObjectDecoder$extractor"));
@@ -111,10 +110,9 @@ public class HttpClientOperationsTest {
 	public void addNamedEncoderReplaysLastHttp() {
 		ByteBuf buf = Unpooled.copiedBuffer("{\"foo\":1}", CharsetUtil.UTF_8);
 		EmbeddedChannel channel = new EmbeddedChannel();
-		HttpClientOperations ops = new HttpClientOperations(() -> channel,
-				ConnectionObserver.emptyListener());
-
-		ops.addHandler("json", new JsonObjectDecoder());
+		HttpClientOperations ops = new HttpClientOperations(() -> channel, ConnectionObserver.emptyListener(),
+				ClientCookieEncoder.STRICT, ClientCookieDecoder.STRICT)
+				.addHandler("json", new JsonObjectDecoder());
 		channel.writeInbound(new DefaultLastHttpContent(buf));
 
 		assertThat(channel.pipeline().names().iterator().next(), is("json$extractor"));
@@ -137,8 +135,9 @@ public class HttpClientOperationsTest {
 		});
 
 		HttpClientOperations ops1 = new HttpClientOperations(() -> channel,
-				ConnectionObserver.emptyListener());
-		ops1.followRedirect(true);
+				ConnectionObserver.emptyListener(),
+				ClientCookieEncoder.STRICT, ClientCookieDecoder.STRICT);
+		ops1.followRedirectPredicate((req, res) -> true);
 
 		HttpClientOperations ops2 = new HttpClientOperations(ops1);
 
@@ -148,7 +147,7 @@ public class HttpClientOperationsTest {
 		assertSame(ops1.isSecure, ops2.isSecure);
 		assertSame(ops1.nettyRequest, ops2.nettyRequest);
 		assertSame(ops1.responseState, ops2.responseState);
-		assertSame(ops1.redirectable, ops2.redirectable);
+		assertSame(ops1.followRedirectPredicate, ops2.followRedirectPredicate);
 		assertSame(ops1.requestHeaders, ops2.requestHeaders);
 	}
 }

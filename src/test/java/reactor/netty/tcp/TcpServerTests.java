@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -143,7 +143,7 @@ public class TcpServerTests {
 			return out.sendString(Mono.just("Hi"))
 			          .neverComplete();
 		})
-		                                         .wiretap()
+		                                         .wiretap(true)
 		                                         .bindNow();
 
 		assertNotNull(connectedServer);
@@ -151,7 +151,7 @@ public class TcpServerTests {
 		final TcpClient client = TcpClient.create()
 		                                  .host("localhost")
 		                                  .port(connectedServer.address().getPort())
-		                                  .secure(clientOptions);
+		                                  .secure(spec -> spec.sslContext(clientOptions));
 
 		Connection connectedClient = client.handle((in, out) -> {
 			//in
@@ -179,15 +179,15 @@ public class TcpServerTests {
 			                    }))
 			          .neverComplete();
 		})
-		                                   .wiretap()
+		                                   .wiretap(true)
 		                                   .connectNow();
 
 		assertNotNull(connectedClient);
 
 		assertTrue("Latch was counted down", latch.await(5, TimeUnit.SECONDS));
 
-		connectedClient.dispose();
-		connectedServer.dispose();
+		connectedClient.disposeNow();
+		connectedServer.disposeNow();
 	}
 
 	@Test(timeout = 10000)
@@ -197,12 +197,12 @@ public class TcpServerTests {
 				          .port(0)
 				          .host("0.0.0.0")
 				          .route(r -> r.get("/data", (request, response) -> response.send(Mono.empty())))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		assertNotNull(httpServer);
 
-		httpServer.dispose();
+		httpServer.disposeNow();
 	}
 
 	@Test
@@ -222,22 +222,22 @@ public class TcpServerTests {
 
 			return Flux.never();
 		                                   })
-		                                   .wiretap()
+		                                   .wiretap(true)
 		                                   .bindNow();
 
 		assertNotNull(server);
 
 		Connection client = TcpClient.create().port(port)
 		                             .handle((in, out) -> out.sendString(Flux.just("Hello World!")))
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		assertNotNull(client);
 
 		assertTrue("Latch was counted down", latch.await(5, TimeUnit.SECONDS));
 
-		client.dispose();
-		server.dispose();
+		client.disposeNow();
+		server.disposeNow();
 	}
 
 	@Test
@@ -264,25 +264,22 @@ public class TcpServerTests {
 		                            .port(port);
 
 		DisposableServer connected = server.handle(serverHandler)
-		                                   .wiretap()
+		                                   .wiretap(true)
 		                                   .bindNow();
 
 		assertNotNull(connected);
 
 		Connection clientContext =
-				client.handle((in, out) -> out.send(Flux.just("Hello World!\n", "Hello 11!\n")
-				                                        .map(b -> out.alloc()
-				                                                     .buffer()
-				                                                     .writeBytes(b.getBytes(Charset.defaultCharset())))))
-				      .wiretap()
+				client.handle((in, out) -> out.sendString(Flux.just("Hello World!\n", "Hello 11!\n")))
+				      .wiretap(true)
 				      .connectNow();
 
 		assertNotNull(clientContext);
 
 		assertTrue("Latch was counted down", latch.await(10, TimeUnit.SECONDS));
 
-		connected.dispose();
-		clientContext.dispose();
+		connected.disposeNow();
+		clientContext.disposeNow();
 	}
 
 	@Test
@@ -316,7 +313,7 @@ public class TcpServerTests {
 		                                                                  .take(Duration.ofSeconds(5))
 		                                                                  .concatWith(Flux.just("end\n")));
 		                               }))
-		                               .wiretap()
+		                               .wiretap(true)
 		                               .bindNow();
 
 		assertNotNull(s);
@@ -326,7 +323,7 @@ public class TcpServerTests {
 			broadcaster.onNext(System.currentTimeMillis() + "\n");
 		}
 
-		s.dispose();
+		s.disposeNow();
 
 	}
 
@@ -343,7 +340,7 @@ public class TcpServerTests {
 		                                         .subscribe(trip -> countDownLatch.countDown());
 		                                       return Flux.never();
 		                                   })
-		                                   .wiretap()
+		                                   .wiretap(true)
 		                                   .bindNow();
 
 		assertNotNull(server);
@@ -355,13 +352,13 @@ public class TcpServerTests {
 		                             .port(server.address()
 		                                         .getPort())
 		                             .handle((in, out) -> out.sendString(Flux.just("test")))
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		assertNotNull(client);
 
-		client.dispose();
-		server.dispose();
+		client.disposeNow();
+		server.disposeNow();
 
 		assertThat("Latch was counted down", countDownLatch.await(5, TimeUnit.SECONDS));
 	}
@@ -372,11 +369,11 @@ public class TcpServerTests {
 		HttpServer server = HttpServer.create();
 		server.route(r -> r.get("/search/{search}",
 		                        (in, out) -> HttpClient.create()
-		                                               .wiretap()
+		                                               .wiretap(true)
 		                                               .get()
 		                                               .uri("foaas.herokuapp.com/life/" + in.param("search"))
 		                                               .response((repliesOut, buf) -> out.send(buf))))
-		      .wiretap()
+		      .wiretap(true)
 		      .bindNow()
 		      .onDispose()
 		      .block(Duration.ofSeconds(30));
@@ -388,12 +385,12 @@ public class TcpServerTests {
 		HttpServer server = HttpServer.create();
 		server.route(r -> r.get("/search/{search}",
 		                        (in, out) -> HttpClient.create()
-		                                               .wiretap()
+		                                               .wiretap(true)
 		                                               .post()
 		                                               .uri("ws://localhost:3000")
 		                                               .send((requestOut, o) -> o.sendString(Mono.just("ping")))
 		                                               .response((repliesOut, buf) ->  out.sendGroups(buf.window(100)))))
-		      .wiretap()
+		      .wiretap(true)
 		      .bindNow()
 		      .onDispose()
 		      .block(Duration.ofSeconds(30));
@@ -417,14 +414,14 @@ public class TcpServerTests {
 
 		DisposableServer context =
 				TcpServer.create()
-				         .secure(sslServer)
+				         .secure(spec -> spec.sslContext(sslServer))
 				         .handle((in, out) ->
 				                 in.receive()
 				                   .asString()
 				                   .flatMap(word -> "GOGOGO".equals(word) ?
 				                            out.sendFile(largeFile).then() :
 				                            out.sendString(Mono.just("NOPE"))))
-				         .wiretap()
+				         .wiretap(true)
 				         .bindNow();
 
 		assertNotNull(context);
@@ -435,7 +432,7 @@ public class TcpServerTests {
 		Connection client1 =
 				TcpClient.create()
 				         .port(context.address().getPort())
-				         .secure(sslClient)
+				         .secure(spec -> spec.sslContext(sslClient))
 				         .handle((in, out) -> {
 				             in.receive()
 				               .asString()
@@ -445,13 +442,13 @@ public class TcpServerTests {
 				             return out.sendString(Mono.just("gogogo"))
 				                       .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		Connection client2 =
 				TcpClient.create()
 				         .port(context.address().getPort())
-				         .secure(sslClient)
+				         .secure(spec -> spec.sslContext(sslClient))
 				         .handle((in, out) -> {
 				             in.receive()
 				               .asString(StandardCharsets.UTF_8)
@@ -463,7 +460,7 @@ public class TcpServerTests {
 				             return out.sendString(Mono.just("GOGOGO"))
 				                       .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		assertNotNull(client2);
@@ -525,7 +522,7 @@ public class TcpServerTests {
 				                   .flatMap(word -> "GOGOGO".equals(word) ?
 				                            fn.apply(out).then() :
 				                            out.sendString(Mono.just("NOPE"))))
-				         .wiretap()
+				         .wiretap(true)
 				         .bindNow();
 
 		assertNotNull(context);
@@ -545,7 +542,7 @@ public class TcpServerTests {
 				             return out.sendString(Mono.just("gogogo"))
 				                       .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		Connection client2 =
@@ -562,7 +559,7 @@ public class TcpServerTests {
 				             return out.sendString(Mono.just("GOGOGO"))
 				                       .neverComplete();
 				         })
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		assertNotNull(client2);
@@ -643,7 +640,7 @@ public class TcpServerTests {
 		                                                         return new Pojo("Jane Doe");
 		                                                     })
 		                                                 .map(jsonEncoder)))
-		                 .wiretap()
+		                 .wiretap(true)
 		                 .bindNow();
 
 		assertNotNull(server);
@@ -660,7 +657,7 @@ public class TcpServerTests {
 		Assertions.assertThat(new String(client.data.array(), Charset.defaultCharset()))
 		          .isEqualTo("{\"name\":\"Jane Doe\"}");
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -695,7 +692,7 @@ public class TcpServerTests {
 				                                .concatMap(Flux::fromArray)
 				                                .window(5)
 				                                .concatMap(w -> out.send(w.collectList().map(jsonEncoder))))
-				         .wiretap()
+				         .wiretap(true)
 				         .bindNow();
 
 		assertNotNull(server);
@@ -718,7 +715,7 @@ public class TcpServerTests {
 		                                                     .map(jsonEncoder))
 		                                           .neverComplete();
 		                             })
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		assertNotNull(client);
@@ -726,8 +723,8 @@ public class TcpServerTests {
 		Assertions.assertThat(dataLatch.await(30, TimeUnit.SECONDS)).isTrue();
 		Assertions.assertThat(dataLatch.getCount()).isEqualTo(0);
 
-		server.dispose();
-		client.dispose();
+		server.disposeNow();
+		client.disposeNow();
 	}
 
 	@Test
@@ -770,7 +767,7 @@ public class TcpServerTests {
 		                                                                     .map(jsonEncoder))
 		                                                       .doOnComplete(() -> System.out.println("wow"))
 		                                                       .log("flatmap-retry")))
-		                 .wiretap()
+		                 .wiretap(true)
 		                 .bindNow();
 
 		assertNotNull(server);
@@ -792,7 +789,7 @@ public class TcpServerTests {
 		                                                     .map(jsonEncoder))
 		                                           .neverComplete();
 		                             })
-		                             .wiretap()
+		                             .wiretap(true)
 		                             .connectNow();
 
 		assertNotNull(client);
@@ -800,8 +797,8 @@ public class TcpServerTests {
 		Assertions.assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
 		Assertions.assertThat(latch.getCount()).isEqualTo(0);
 
-		server.dispose();
-		client.dispose();
+		server.disposeNow();
+		client.disposeNow();
 	}
 
 	@Test

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ public interface DisposableServer extends DisposableChannel {
 
 	/**
 	 * Return the server's host String. That is, the hostname or in case the server was bound
-	 * to a literal IP adress, the IP string representation (rather than performing a reverse-DNS
+	 * to a literal IP address, the IP string representation (rather than performing a reverse-DNS
 	 * lookup).
 	 *
 	 * @return the host string, without reverse DNS lookup

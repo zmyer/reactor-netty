@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,7 +86,7 @@ public class BlockingConnectionTest {
 						         )
 						         .neverComplete()
 				         )
-				         .wiretap()
+				         .wiretap(true)
 				         .bindNow();
 
 		System.out.println(simpleServer.address().getHostString());
@@ -108,7 +108,7 @@ public class BlockingConnectionTest {
 				                                        .doOnNext(data1::set)
 				                                        .doOnNext(System.err::println)
 				                                        .then()))
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		Connection simpleClient2 =
@@ -125,7 +125,7 @@ public class BlockingConnectionTest {
 				                                        .doOnNext(data2::set)
 				                                        .doOnNext(System.err::println)
 				                                        .then()))
-				         .wiretap()
+				         .wiretap(true)
 				         .connectNow();
 
 		Thread.sleep(100);

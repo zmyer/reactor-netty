@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,9 @@ import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
+import java.nio.channels.Channel;
 import java.nio.channels.CompletionHandler;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
@@ -31,13 +33,17 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMethod;
 import org.junit.Test;
+import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
@@ -68,7 +74,7 @@ public class HttpSendFileTests {
 		Path largeFile = Paths.get(getClass().getResource("/largeFile.txt").toURI());
 		long fileSize = Files.size(largeFile);
 		assertSendFile(out -> out.sendFileChunked(largeFile, 1024, fileSize - 1024),
-		               false,
+		               false, -1, (req, res) -> false,
 		               body -> assertThat(body).startsWith("<- 1024 mark here")
 		                                       .endsWith("End of File"));
 	}
@@ -110,16 +116,121 @@ public class HttpSendFileTests {
 			Path fromZipFile = zipFs.getPath("/largeFile.txt");
 			long fileSize = Files.size(fromZipFile);
 
-			assertSendFile(out -> out.compression(true).sendFile(fromZipFile, 0, fileSize), true);
+			assertSendFile(out -> out.compression(true).sendFile(fromZipFile, 0, fileSize), true, -1, (req, res) -> false);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionSize_1() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader(HttpHeaderNames.CONTENT_LENGTH, "1245")
+			                         .sendFile(fromZipFile, 0, fileSize), true, 2048, null);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionSize_2() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader(HttpHeaderNames.CONTENT_LENGTH, "1245")
+			                         .sendFile(fromZipFile, 0, fileSize), true, 2048, (req, res) -> true);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionSize_3() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader(HttpHeaderNames.CONTENT_LENGTH, "1245")
+			                         .sendFile(fromZipFile, 0, fileSize), true, 512, null);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionSize_4() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader(HttpHeaderNames.CONTENT_LENGTH, "1245")
+			                         .sendFile(fromZipFile, 0, fileSize), true, 512, (req, res) -> false);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionPredicate_1() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.sendFile(fromZipFile, 0, fileSize), true, -1, (req, res) -> true);
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionPredicate_2() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader("test", "test").sendFile(fromZipFile, 0, fileSize), true,
+					-1, (req, res) -> res.responseHeaders().contains("test"));
+		}
+	}
+
+	@Test
+	public void sendZipFileCompressionPredicate_3() throws IOException {
+		Path path = Files.createTempFile(null, ".zip");
+		Files.copy(this.getClass().getResourceAsStream("/zipFile.zip"), path, StandardCopyOption.REPLACE_EXISTING);
+		path.toFile().deleteOnExit();
+
+		try (FileSystem zipFs = FileSystems.newFileSystem(path, null)) {
+			Path fromZipFile = zipFs.getPath("/largeFile.txt");
+			long fileSize = Files.size(fromZipFile);
+
+			assertSendFile(out -> out.addHeader("test", "test").sendFile(fromZipFile, 0, fileSize), true,
+					-1, (req, res) -> !res.responseHeaders().contains("test"));
 		}
 	}
 
 	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn) {
-		assertSendFile(fn, false);
+		assertSendFile(fn, false, -1, (req, res) -> false);
 	}
 
-	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn, boolean compression) {
-		assertSendFile(fn, compression,
+	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn, boolean compression,
+			int compressionSize, BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate) {
+		assertSendFile(fn, compression, compressionSize, compressionPredicate,
 		               body ->
 		                   assertThat(body).startsWith("This is an UTF-8 file that is larger than 1024 bytes. "
 		                                               + "It contains accents like é.")
@@ -127,24 +238,34 @@ public class HttpSendFileTests {
 		                                   .endsWith("End of File"));
 	}
 
-	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn, boolean compression, Consumer<String> bodyAssertion) {
+	private void assertSendFile(Function<HttpServerResponse, NettyOutbound> fn, boolean compression, int compressionSize,
+			BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate, Consumer<String> bodyAssertion) {
+		HttpServer server = HttpServer.create();
+		if (compressionPredicate != null) {
+			server = server.compress(compressionPredicate);
+		}
+        if (compressionSize > -1) {
+			server = server.compress(compressionSize);
+		}
 		DisposableServer context =
-				customizeServerOptions(HttpServer.create())
+				customizeServerOptions(server)
 				          .handle((req, resp) -> fn.apply(resp))
+				          .wiretap(true)
 				          .bindNow();
 
 		HttpClient client;
 		if (compression) {
 			client = HttpClient.create()
-			                   .addressSupplier(() -> context.address())
-			                   .compress();
+			                   .addressSupplier(context::address)
+			                   .compress(true);
 		}
 		else {
 			client = HttpClient.create()
-			                   .addressSupplier(() -> context.address());
+			                   .addressSupplier(context::address);
 		}
 		Mono<String> response =
 				customizeClientOptions(client)
+				          .wiretap(true)
 				          .get()
 				          .uri("/foo")
 				          .responseSingle((res, byteBufMono) -> byteBufMono.asString(StandardCharsets.UTF_8));
@@ -158,15 +279,32 @@ public class HttpSendFileTests {
 
 	@Test
 	public void sendFileAsync4096() throws IOException, URISyntaxException {
-		doTestSendFileAsync(4096);
+		doTestSendFileAsync((req, resp) -> resp.sendByteArray(req.receive()
+				                                                 .aggregate()
+				                                                 .asByteArray()),
+				4096, null);
+	}
+
+	@Test
+	public void sendFileAsync4096Negative() throws IOException, URISyntaxException {
+		doTestSendFileAsync((req, resp) -> req.receive()
+				                              .take(10)
+				                              .doOnNext(b -> resp.status(500)
+				                                                 .header(HttpHeaderNames.CONNECTION, "close"))
+				                              .then(),
+				4096, "error".getBytes(Charset.defaultCharset()));
 	}
 
 	@Test
 	public void sendFileAsync1024() throws IOException, URISyntaxException {
-		doTestSendFileAsync(1024);
+		doTestSendFileAsync((req, resp) -> resp.sendByteArray(req.receive()
+				                                                 .aggregate()
+				                                                 .asByteArray()),
+				1024, null);
 	}
 
-	protected void doTestSendFileAsync(int chunk) throws IOException, URISyntaxException {
+	private void doTestSendFileAsync(BiFunction<? super HttpServerRequest, ? super
+			HttpServerResponse, ? extends Publisher<Void>> fn, int chunk, byte[] expectedContent) throws IOException, URISyntaxException {
 		Path largeFile = Paths.get(getClass().getResource("/largeFile.txt").toURI());
 		Path tempFile = Files.createTempFile(largeFile.getParent(),"temp", ".txt");
 		tempFile.toFile().deleteOnExit();
@@ -177,47 +315,51 @@ public class HttpSendFileTests {
 		}
 
 		ByteBufAllocator allocator = ByteBufAllocator.DEFAULT;
-		AsynchronousFileChannel channel =
-				AsynchronousFileChannel.open(tempFile, StandardOpenOption.READ);
 
-		Flux<ByteBuf> content = Flux.create(fluxSink -> {
-			fluxSink.onDispose(() -> {
-				try {
-					if (channel != null) {
-						channel.close();
-					}
-				}
-				catch (IOException ignored) {
-				}
-			});
-
-			ByteBuffer buf = ByteBuffer.allocate(chunk);
-			channel.read(buf, 0, buf, new TestCompletionHandler(channel, fluxSink, allocator, chunk));
-		});
+		Flux<ByteBuf> content =
+				Flux.using(
+				        () -> AsynchronousFileChannel.open(tempFile, StandardOpenOption.READ),
+				        ch -> Flux.create(fluxSink -> {
+				                ByteBuffer buf = ByteBuffer.allocate(chunk);
+				                ch.read(buf, 0, buf, new TestCompletionHandler(ch, fluxSink, allocator, chunk));
+				        }),
+				        this::closeChannel);
 
 		DisposableServer context =
 				customizeServerOptions(HttpServer.create()
 				                                 .host("localhost"))
-				          .handle((req, resp) -> resp.sendByteArray(req.receive()
-				                                                       .aggregate()
-				                                                       .asByteArray()))
+				          .handle(fn)
 				          .bindNow();
 
 		try {
-			byte[] response = customizeClientOptions(HttpClient.create()
-			                                                   .addressSupplier(() -> context.address())).request(
-					HttpMethod.POST)
-			                                                                                             .uri("/")
-			                                                                                             .send(content)
-			                                                                                             .responseContent()
-			                                                                                             .aggregate()
-			                                                                                             .asByteArray()
-			                                                                                             .block();
+			AtomicLong counter = new AtomicLong(0);
+			byte[] response =
+					customizeClientOptions(HttpClient.create()
+					                                 .addressSupplier(context::address))
+					    .request(HttpMethod.POST)
+					    .uri("/")
+					    .send(content)
+					    .responseContent()
+					    .aggregate()
+					    .asByteArray()
+					    .onErrorReturn(IOException.class,
+					        "error".getBytes(Charset.defaultCharset()))
+					    .block();
 
-			assertThat(response).isEqualTo(Files.readAllBytes(tempFile));
+			assertThat(response).isEqualTo(expectedContent == null ? Files.readAllBytes(tempFile) : expectedContent);
 		}
 		finally {
-			context.dispose();
+			context.disposeNow();
+		}
+	}
+
+	private void closeChannel(Channel channel) {
+		if (channel != null && channel.isOpen()) {
+			try {
+				channel.close();
+			}
+			catch (IOException ignored) {
+			}
 		}
 	}
 
@@ -257,9 +399,7 @@ public class HttpSendFileTests {
 			}
 			else {
 				try {
-					if (channel != null) {
-						channel.close();
-					}
+					channel.close();
 				}
 				catch (IOException ignored) {
 				}
@@ -270,9 +410,7 @@ public class HttpSendFileTests {
 		@Override
 		public void failed(Throwable exc, ByteBuffer dataBuffer) {
 			try {
-				if (channel != null) {
-					channel.close();
-				}
+				channel.close();
 			}
 			catch (IOException ignored) {
 			}

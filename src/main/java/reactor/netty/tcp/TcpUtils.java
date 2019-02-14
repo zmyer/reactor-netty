@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import javax.annotation.Nullable;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.handler.logging.LoggingHandler;
 import io.netty.resolver.DefaultAddressResolverGroup;
 import io.netty.resolver.NoopAddressResolverGroup;
 import io.netty.util.NetUtil;
@@ -42,20 +41,7 @@ final class TcpUtils {
 	static Bootstrap updateProxySupport(Bootstrap b, ProxyProvider proxyOptions) {
 		BootstrapHandlers.updateConfiguration(b,
 				NettyPipeline.ProxyHandler,
-				(listener, channel) -> {
-			if (proxyOptions.shouldProxy(b.config()
-			                .remoteAddress())) {
-
-				channel.pipeline()
-				       .addFirst(NettyPipeline.ProxyHandler,
-				                 proxyOptions.newProxyHandler());
-
-				if (log.isDebugEnabled()) {
-					channel.pipeline()
-					       .addFirst(new LoggingHandler("reactor.netty.proxy"));
-				}
-			}
-		});
+				new ProxyProvider.DeferredProxySupport(proxyOptions));
 
 		if (b.config().resolver() == DefaultAddressResolverGroup.INSTANCE) {
 			return b.resolver(NoopAddressResolverGroup.INSTANCE);
@@ -129,5 +115,6 @@ final class TcpUtils {
 
 	static final ChannelOperations.OnSetup TCP_OPS =
 			(ch, c, msg) -> new ChannelOperations<>(ch, c);
+
 
 }

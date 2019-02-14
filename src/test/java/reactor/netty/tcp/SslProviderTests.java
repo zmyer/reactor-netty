@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,13 @@
  */
 package reactor.netty.tcp;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import io.netty.handler.ssl.JdkSslContext;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.OpenSslContext;
+import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.junit.Before;
@@ -23,9 +30,6 @@ import reactor.netty.DisposableServer;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.server.HttpServer;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -33,7 +37,8 @@ import static org.junit.Assert.assertTrue;
  * @author Violeta Georgieva
  */
 public class SslProviderTests {
-	private List<String> result;
+	private List<String> protocols;
+	private SslContext sslContext;
 	private HttpServer server;
 	private SslContextBuilder builder;
 
@@ -41,13 +46,14 @@ public class SslProviderTests {
 	public void setUp() throws Exception {
 		SelfSignedCertificate cert = new SelfSignedCertificate();
 		builder = SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
-		result = new ArrayList<>();
+		protocols = new ArrayList<>();
 		server = HttpServer.create()
 				           .port(0)
 				           .tcpConfiguration(tcpServer -> tcpServer.doOnBind(b -> {
 				               SslProvider ssl = reactor.netty.tcp.SslProvider.findSslSupport(b);
 				               if (ssl != null) {
-				                   result.addAll(ssl.sslContext.applicationProtocolNegotiator().protocols());
+				                   protocols.addAll(ssl.sslContext.applicationProtocolNegotiator().protocols());
+				                   sslContext = ssl.sslContext;
 				               }
 				           }));
 	}
@@ -58,8 +64,10 @@ public class SslProviderTests {
 				server.protocol(HttpProtocol.HTTP11)
 				      .secure(spec -> spec.sslContext(builder))
 				      .bindNow();
-		assertTrue(result.isEmpty());
-		disposableServer.dispose();
+		assertTrue(protocols.isEmpty());
+		assertTrue(OpenSsl.isAvailable() ? sslContext instanceof OpenSslContext :
+		                                   sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 
 	@Test
@@ -68,8 +76,10 @@ public class SslProviderTests {
 				server.secure(spec -> spec.sslContext(builder))
 				      .protocol(HttpProtocol.HTTP11)
 				      .bindNow();
-		assertTrue(result.isEmpty());
-		disposableServer.dispose();
+		assertTrue(protocols.isEmpty());
+		assertTrue(OpenSsl.isAvailable() ? sslContext instanceof OpenSslContext :
+		                                   sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 
 	@Test
@@ -79,8 +89,10 @@ public class SslProviderTests {
 				      .secure(spec -> spec.sslContext(builder))
 				      .protocol(HttpProtocol.HTTP11)
 				      .bindNow();
-		assertTrue(result.isEmpty());
-		disposableServer.dispose();
+		assertTrue(protocols.isEmpty());
+		assertTrue(OpenSsl.isAvailable() ? sslContext instanceof OpenSslContext :
+		                                   sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 
 	@Test
@@ -89,8 +101,11 @@ public class SslProviderTests {
 				server.protocol(HttpProtocol.H2)
 				      .secure(spec -> spec.sslContext(builder))
 				      .bindNow();
-		assertEquals(result.size(),2);
-		disposableServer.dispose();
+		assertEquals(2, protocols.size());
+		assertTrue(protocols.contains("h2"));
+		assertTrue(OpenSsl.isAlpnSupported() ? sslContext instanceof OpenSslContext :
+		                                       sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 
 	@Test
@@ -99,8 +114,11 @@ public class SslProviderTests {
 				server.secure(spec -> spec.sslContext(builder))
 				      .protocol(HttpProtocol.H2)
 				      .bindNow();
-		assertEquals(result.size(),2);
-		disposableServer.dispose();
+		assertEquals(2, protocols.size());
+		assertTrue(protocols.contains("h2"));
+		assertTrue(OpenSsl.isAlpnSupported() ? sslContext instanceof OpenSslContext :
+		                                       sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 
 	@Test
@@ -110,7 +128,10 @@ public class SslProviderTests {
 				      .secure(spec -> spec.sslContext(builder))
 				      .protocol(HttpProtocol.H2)
 				      .bindNow();
-		assertEquals(result.size(),2);
-		disposableServer.dispose();
+		assertEquals(2, protocols.size());
+		assertTrue(protocols.contains("h2"));
+		assertTrue(OpenSsl.isAlpnSupported() ? sslContext instanceof OpenSslContext :
+		                                       sslContext instanceof JdkSslContext);
+		disposableServer.disposeNow();
 	}
 }

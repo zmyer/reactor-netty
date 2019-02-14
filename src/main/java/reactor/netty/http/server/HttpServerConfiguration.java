@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import java.util.function.BiPredicate;
 import java.util.function.Function;
 
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.util.AttributeKey;
 import reactor.netty.http.HttpProtocol;
 
@@ -33,13 +35,13 @@ final class HttpServerConfiguration {
 	static final AttributeKey<HttpServerConfiguration> CONF_KEY =
 			AttributeKey.newInstance("httpServerConf");
 
-	static final HttpProtocol[] HTTP11 = {HttpProtocol.HTTP11};
-
 	BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate  = null;
 
 	int                    minCompressionSize = -1;
 	boolean                forwarded          = false;
 	HttpRequestDecoderSpec decoder            = new HttpRequestDecoderSpec();
+	ServerCookieEncoder    cookieEncoder      = ServerCookieEncoder.STRICT;
+	ServerCookieDecoder    cookieDecoder      = ServerCookieDecoder.STRICT;
 	int                    protocols          = h11;
 
 
@@ -125,6 +127,14 @@ final class HttpServerConfiguration {
 	static ServerBootstrap decoder(ServerBootstrap b,
 			HttpRequestDecoderSpec decoder) {
 		getOrCreate(b).decoder = decoder;
+		return b;
+	}
+
+	static ServerBootstrap cookieCodec(ServerBootstrap b,
+			ServerCookieEncoder encoder, ServerCookieDecoder decoder) {
+		HttpServerConfiguration conf = getOrCreate(b);
+		conf.cookieEncoder = encoder;
+		conf.cookieDecoder = decoder;
 		return b;
 	}
 

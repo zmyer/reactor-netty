@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,16 +17,22 @@
 package reactor.netty.resources;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.pool.ChannelHealthChecker;
 import io.netty.channel.pool.ChannelPool;
@@ -46,10 +52,11 @@ import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.channel.ChannelOperations;
 import reactor.util.Logger;
 import reactor.util.Loggers;
+import reactor.util.annotation.NonNull;
 import reactor.util.concurrent.Queues;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -66,11 +73,54 @@ final class PooledConnectionProvider implements ConnectionProvider {
 	final ConcurrentMap<PoolKey, Pool> channelPools;
 	final String                       name;
 	final PoolFactory                  poolFactory;
+	final int                          maxConnections;
 
 	PooledConnectionProvider(String name, PoolFactory poolFactory) {
 		this.name = name;
 		this.poolFactory = poolFactory;
 		this.channelPools = PlatformDependent.newConcurrentHashMap();
+		this.maxConnections = -1;
+	}
+
+	PooledConnectionProvider(String name, PoolFactory poolFactory, int maxConnections) {
+		this.name = name;
+		this.poolFactory = poolFactory;
+		this.channelPools = PlatformDependent.newConcurrentHashMap();
+		this.maxConnections = maxConnections;
+	}
+
+	@Override
+	public void disposeWhen(@NonNull SocketAddress address) {
+		List<Map.Entry<PoolKey, Pool>> toDispose;
+
+		toDispose = channelPools.entrySet()
+		                        .stream()
+		                        .filter(p -> compareAddresses(p.getKey().holder, address))
+		                        .collect(Collectors.toList());
+
+		toDispose.forEach(e -> {
+			if (channelPools.remove(e.getKey(), e.getValue())) {
+				if(log.isDebugEnabled()){
+					log.debug("Disposing pool for {}", e.getKey().fqdn);
+				}
+				e.getValue().pool.close();
+			}
+		});
+	}
+
+	private boolean compareAddresses(SocketAddress origin, SocketAddress target) {
+		if (origin.equals(target)) {
+			return true;
+		}
+		else if (origin instanceof InetSocketAddress &&
+				target instanceof InetSocketAddress) {
+			InetSocketAddress isaOrigin = (InetSocketAddress) origin;
+			InetSocketAddress isaTarget = (InetSocketAddress) target;
+			InetAddress iaTarget = isaTarget.getAddress();
+			return iaTarget != null && iaTarget.isAnyLocalAddress() &&
+					isaOrigin.getPort() == isaTarget.getPort();
+		}
+		return false;
 	}
 
 	@Override
@@ -84,8 +134,9 @@ final class PooledConnectionProvider implements ConnectionProvider {
 			ConnectionObserver obs = BootstrapHandlers.connectionObserver(bootstrap);
 
 			NewConnectionProvider.convertLazyRemoteAddress(bootstrap);
-			PoolKey holder = new PoolKey(bootstrap.config()
-			                                      .remoteAddress(), opsFactory);
+			ChannelHandler handler = bootstrap.config().handler();
+			PoolKey holder = new PoolKey(bootstrap.config().remoteAddress(),
+					handler != null ? handler.hashCode() : -1);
 
 			Pool pool;
 			for (; ; ) {
@@ -137,10 +188,25 @@ final class PooledConnectionProvider implements ConnectionProvider {
 		                                             .allMatch(AtomicBoolean::get);
 	}
 
+	@Override
+	public int maxConnections() {
+		return maxConnections;
+	}
+
+	@Override
+	public String toString() {
+		return "PooledConnectionProvider {" +
+				"name=" + name +
+				", poolFactory=" + poolFactory +
+				'}';
+	}
+
+	@SuppressWarnings("FutureReturnValueIgnored")
 	static void disposableAcquire(MonoSink<Connection> sink, ConnectionObserver obs, Pool pool) {
 		Future<Channel> f = pool.acquire();
 		DisposableAcquire disposableAcquire =
 				new DisposableAcquire(sink, f, pool, obs);
+		// Returned value is deliberately ignored
 		f.addListener(disposableAcquire);
 		sink.onCancel(disposableAcquire);
 	}
@@ -159,11 +225,11 @@ final class PooledConnectionProvider implements ConnectionProvider {
 		final ChannelOperations.OnSetup opsFactory;
 
 		final AtomicInteger activeConnections = new AtomicInteger();
+		final AtomicInteger inactiveConnections = new AtomicInteger();
 
 		final Future<Boolean> HEALTHY;
 		final Future<Boolean> UNHEALTHY;
 
-		@SuppressWarnings("unchecked")
 		Pool(Bootstrap bootstrap,
 				PoolFactory provider,
 				ChannelOperations.OnSetup opsFactory) {
@@ -214,9 +280,10 @@ final class PooledConnectionProvider implements ConnectionProvider {
 		@Override
 		public void channelReleased(Channel ch) {
 			activeConnections.decrementAndGet();
+			inactiveConnections.incrementAndGet();
 			if (log.isDebugEnabled()) {
-				log.debug(format(ch, "Channel cleaned, now {} active connections"),
-						activeConnections);
+				log.debug(format(ch, "Channel cleaned, now {} active connections and {} inactive connections"),
+						activeConnections, inactiveConnections);
 			}
 		}
 
@@ -239,9 +306,10 @@ final class PooledConnectionProvider implements ConnectionProvider {
 				see https://github.com/reactor/reactor-netty/issues/289
 			 */
 
+			inactiveConnections.incrementAndGet();
 			if (log.isDebugEnabled()) {
-				log.debug(format(ch, "Created new pooled channel, now {} active connections"),
-						activeConnections);
+				log.debug(format(ch, "Created new pooled channel, now {} active connections and {} inactive connections"),
+						activeConnections, inactiveConnections);
 			}
 
 			PooledConnection pooledConnection = new PooledConnection(ch, this);
@@ -259,7 +327,10 @@ final class PooledConnectionProvider implements ConnectionProvider {
 
 		@Override
 		public String toString() {
-			return "{ bootstrap=" + bootstrap + ", activeConnections=" + activeConnections + '}';
+			return "{ bootstrap=" + bootstrap +
+					", activeConnections=" + activeConnections +
+					", inactiveConnections=" + inactiveConnections +
+					'}';
 		}
 	}
 
@@ -290,8 +361,7 @@ final class PooledConnectionProvider implements ConnectionProvider {
 		}
 	}
 
-	final static class PooledConnection implements Connection, ConnectionObserver,
-	                                               GenericFutureListener<Future<Void>> {
+	final static class PooledConnection implements Connection, ConnectionObserver {
 
 		final Channel channel;
 		final Pool    pool;
@@ -339,19 +409,7 @@ final class PooledConnectionProvider implements ConnectionProvider {
 
 		@Override
 		public void onUncaughtException(Connection connection, Throwable error) {
-			log.error(format(connection.channel(), "Pooled connection observed an error"), error);
 			owner().onUncaughtException(connection, error);
-		}
-
-		@Override
-		public void operationComplete(Future<Void> future) {
-			if (log.isDebugEnabled() && !future.isSuccess()) {
-				log.debug("Failed cleaning the channel from pool", future.cause());
-			}
-			onTerminate.onComplete();
-			channel.attr(OWNER)
-			       .getAndSet(ConnectionObserver.emptyListener())
-			       .onStateChange(this, State.RELEASED);
 		}
 
 		@Override
@@ -363,8 +421,8 @@ final class PooledConnectionProvider implements ConnectionProvider {
 
 				if (!isPersistent() && channel.isActive()) {
 					//will be released by closeFuture internals
-					owner().onStateChange(connection, State.DISCONNECTING);
 					channel.close();
+					owner().onStateChange(connection, State.DISCONNECTING);
 					return;
 				}
 
@@ -378,8 +436,17 @@ final class PooledConnectionProvider implements ConnectionProvider {
 					log.debug(format(connection.channel(), "Releasing channel"));
 				}
 
+				ConnectionObserver obs = channel.attr(OWNER)
+						.getAndSet(ConnectionObserver.emptyListener());
+
 				pool.release(channel)
-				    .addListener(this);
+				    .addListener(f -> {
+					    if (log.isDebugEnabled() && !f.isSuccess()) {
+						    log.debug("Failed cleaning the channel from pool", f.cause());
+					    }
+					    onTerminate.onComplete();
+						obs.onStateChange(connection, State.RELEASED);
+				    });
 				return;
 			}
 
@@ -417,6 +484,7 @@ final class PooledConnectionProvider implements ConnectionProvider {
 				return;
 			}
 
+			// Returned value is deliberately ignored
 			f.removeListener(this);
 
 			if (!f.isDone()) {
@@ -452,13 +520,13 @@ final class PooledConnectionProvider implements ConnectionProvider {
 		public void run() {
 			Channel c = f.getNow();
 			pool.activeConnections.incrementAndGet();
+			pool.inactiveConnections.decrementAndGet();
 
 
 			ConnectionObserver current = c.attr(OWNER)
 			                              .getAndSet(this);
 
 			if (current instanceof PendingConnectionObserver) {
-				@SuppressWarnings("unchecked")
 				PendingConnectionObserver pending = (PendingConnectionObserver)current;
 				PendingConnectionObserver.Pending p;
 				current = null;
@@ -477,13 +545,12 @@ final class PooledConnectionProvider implements ConnectionProvider {
 				registerClose(c);
 			}
 
-			Connection conn = Connection.from(c);
-
 
 			if (current != null) {
+				Connection conn = Connection.from(c);
 				if (log.isDebugEnabled()) {
-					log.debug(format(c, "Channel acquired, now {} active connection(s)"),
-							pool.activeConnections);
+					log.debug(format(c, "Channel acquired, now {} active connections and {} inactive connections"),
+							pool.activeConnections, pool.inactiveConnections);
 				}
 				obs.onStateChange(conn, State.ACQUIRED);
 
@@ -492,8 +559,8 @@ final class PooledConnectionProvider implements ConnectionProvider {
 					ChannelOperations<?, ?> ops = pool.opsFactory.create(con, con, null);
 					if (ops != null) {
 						ops.bind();
-						sink.success(ops);
 						obs.onStateChange(ops, State.CONFIGURED);
+						sink.success(ops);
 					}
 					else {
 						//already configured, just forward the connection
@@ -504,13 +571,17 @@ final class PooledConnectionProvider implements ConnectionProvider {
 					//already bound, just forward the connection
 					sink.success(conn);
 				}
+				return;
 			}
-			else {
-				if (log.isDebugEnabled()) {
-					log.debug(format(c, "Channel connected, now {} active connection(s)"),
-							pool.activeConnections);
-				}
-				sink.success(conn);
+			//Connected, leave onStateChange forward the event if factory
+
+			if (log.isDebugEnabled()) {
+				log.debug(format(c, "Channel connected, now {} active " +
+								"connections and {} inactive connections"),
+						pool.activeConnections, pool.inactiveConnections);
+			}
+			if (pool.opsFactory == ChannelOperations.OnSetup.empty()) {
+				sink.success(Connection.from(c));
 			}
 		}
 
@@ -519,12 +590,20 @@ final class PooledConnectionProvider implements ConnectionProvider {
 				log.debug(format(c, "Registering pool release on close event for channel"));
 			}
 			c.closeFuture()
-			 .addListener(ff -> pool.release(c));
+			 .addListener(ff -> {
+			     pool.release(c);
+			     pool.inactiveConnections.decrementAndGet();
+			     if (log.isDebugEnabled()) {
+			         log.debug(format(c, "Channel closed, now {} active connections and {} inactive connections"),
+			                 pool.activeConnections, pool.inactiveConnections);
+			     }
+			 });
 		}
 
 		@Override
 		public final void operationComplete(Future<Channel> f) throws Exception {
 			if (!f.isSuccess()) {
+				pool.inactiveConnections.decrementAndGet();
 				if (f.isCancelled()) {
 					if (log.isDebugEnabled()) {
 						log.debug("Cancelled acquiring from pool {}", pool);
@@ -562,14 +641,14 @@ final class PooledConnectionProvider implements ConnectionProvider {
 
 	final static class PoolKey {
 
-		final SocketAddress             holder;
-		final String                    fqdn;
-		final ChannelOperations.OnSetup opsFactory;
+		final SocketAddress holder;
+		final int pipelineKey;
+		final String fqdn;
 
-		PoolKey(SocketAddress holder, ChannelOperations.OnSetup opsFactory) {
+		PoolKey(SocketAddress holder, int pipelineKey) {
 			this.holder = holder;
-			this.opsFactory = opsFactory;
 			this.fqdn = holder instanceof InetSocketAddress ? holder.toString() : null;
+			this.pipelineKey = pipelineKey;
 		}
 
 		@Override
@@ -580,19 +659,15 @@ final class PooledConnectionProvider implements ConnectionProvider {
 			if (o == null || getClass() != o.getClass()) {
 				return false;
 			}
-
-			PoolKey that = (PoolKey) o;
-
-			return holder.equals(that.holder) && (fqdn != null ? fqdn.equals(that.fqdn) :
-					that.fqdn == null) && opsFactory.equals(that.opsFactory);
+			PoolKey poolKey = (PoolKey) o;
+			return pipelineKey == poolKey.pipelineKey &&
+					Objects.equals(holder, poolKey.holder) &&
+					Objects.equals(fqdn, poolKey.fqdn);
 		}
 
 		@Override
 		public int hashCode() {
-			int result = holder.hashCode();
-			result = 31 * result + (fqdn != null ? fqdn.hashCode() : 0);
-			result = 31 * result + opsFactory.hashCode();
-			return result;
+			return Objects.hash(holder, pipelineKey, fqdn);
 		}
 	}
 }

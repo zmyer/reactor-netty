@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -62,11 +62,13 @@ public interface NettyPipeline {
 	String HttpAggregator     = LEFT + "httpAggregator";
 	String HttpTrafficHandler = LEFT + "httpTrafficHandler";
 	String HttpInitializer    = LEFT + "httpInitializer";
+	String AccessLogHandler   = LEFT + "accessLogHandler";
 	String OnChannelWriteIdle = LEFT + "onChannelWriteIdle";
 	String OnChannelReadIdle  = LEFT + "onChannelReadIdle";
 	String ChunkedWriter      = LEFT + "chunkedWriter";
 	String LoggingHandler     = LEFT + "loggingHandler";
 	String CompressionHandler = LEFT + "compressionHandler";
+	String WsCompressionHandler = LEFT + "wsCompressionHandler";
 
 	/**
 	 * A builder for sending strategy, similar prefixed methods being mutually exclusive

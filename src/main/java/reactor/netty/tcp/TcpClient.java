@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,13 +43,14 @@ import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.NettyInbound;
 import reactor.netty.NettyOutbound;
+import reactor.netty.NettyPipeline;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.netty.resources.LoopResources;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * A TcpClient allows to build in a safe immutable way a TCP client that
@@ -179,7 +180,7 @@ public abstract class TcpClient {
 			b = configure();
 		}
 		catch (Throwable t) {
-			Exceptions.throwIfFatal(t);
+			Exceptions.throwIfJvmFatal(t);
 			return Mono.error(t);
 		}
 		return connect(b);
@@ -501,9 +502,22 @@ public abstract class TcpClient {
 	 * @param sslContext The context to set when configuring SSL
 	 *
 	 * @return a new {@link TcpClient}
+	 * @deprecated Use {@link TcpClient#secure(Consumer)}
 	 */
+	@Deprecated
 	public final TcpClient secure(SslContext sslContext) {
 		return secure(sslProviderBuilder -> sslProviderBuilder.sslContext(sslContext));
+	}
+
+	/**
+	 * Apply an SSL configuration via the passed {@link SslProvider}.
+	 *
+	 * @param sslProvider The provider to set when configuring SSL
+	 *
+	 * @return a new {@link TcpClient}
+	 */
+	public final TcpClient secure(SslProvider sslProvider) {
+		return new TcpClientSecure(this, sslProvider);
 	}
 
 	/**
@@ -523,9 +537,28 @@ public abstract class TcpClient {
 	 * and {@code DEBUG} logger level
 	 *
 	 * @return a new {@link TcpClient}
+	 * @deprecated Use {@link TcpClient#wiretap(boolean)}
 	 */
+	@Deprecated
 	public final TcpClient wiretap() {
 		return bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER));
+	}
+
+	/**
+	 * Apply or remove a wire logger configuration using {@link TcpClient} category
+	 * and {@code DEBUG} logger level
+	 *
+	 * @param enable Specifies whether the wire logger configuration will be added to
+	 *               the pipeline
+	 * @return a new {@link TcpClient}
+	 */
+	public final TcpClient wiretap(boolean enable) {
+		if (enable) {
+			return bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER));
+		}
+		else {
+			return bootstrap(b -> BootstrapHandlers.removeConfiguration(b, NettyPipeline.LoggingHandler));
+		}
 	}
 
 	/**

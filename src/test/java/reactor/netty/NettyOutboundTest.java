@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ import javax.net.ssl.SSLException;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.FileRegion;
@@ -114,7 +115,7 @@ public class NettyOutboundTest {
 				return this;
 			}
 		};
-		channel.writeOneOutbound(1);
+		ChannelFuture f = channel.writeOneOutbound(1);
 
 		outbound.sendFile(Paths.get(getClass().getResource("/largeFile.txt").toURI()))
 		        .then().block();
@@ -129,6 +130,7 @@ public class NettyOutboundTest {
 				.startsWith("This is an UTF-8 file that is larger than 1024 bytes. It contains accents like é. GARBAGE")
 				.endsWith("GARBAGE End of File");
 
+		assertThat(f.isSuccess()).isTrue();
 		assertThat(channel.finishAndReleaseAll()).isTrue();
 	}
 
@@ -152,7 +154,7 @@ public class NettyOutboundTest {
 					@Override
 					protected void encode(ChannelHandlerContext ctx, ByteBuf msg,
 							List<Object> out) {
-						clearMessages.add(msg.toString(CharsetUtil.UTF_8));
+						clearMessages.add(msg.readCharSequence(msg.readableBytes(), CharsetUtil.UTF_8));
 						out.add(msg.retain()); //the encoder will release the buffer, make sure it is retained for SslHandler
 					}
 				},
@@ -199,7 +201,7 @@ public class NettyOutboundTest {
 				return this;
 			}
 		};
-		channel.writeOneOutbound(1);
+		ChannelFuture f = channel.writeOneOutbound(1);
 
 		try{
 			outbound.sendFile(Paths.get(getClass().getResource("/largeFile.txt").toURI()))
@@ -225,6 +227,7 @@ public class NettyOutboundTest {
 				.startsWith("<- 1024 mark here")
 				.endsWith("End of File");
 
+		assertThat(f.isSuccess()).isFalse();
 		assertThat(channel.finishAndReleaseAll()).isTrue();
 	}
 
@@ -239,7 +242,7 @@ public class NettyOutboundTest {
 					@Override
 					protected void encode(ChannelHandlerContext ctx, ByteBuf msg,
 							List<Object> out) {
-						out.add(msg.toString(CharsetUtil.UTF_8));
+						out.add(msg.readCharSequence(msg.readableBytes(), CharsetUtil.UTF_8));
 					}
 				},
 				//transform the ChunkedFile into ByteBuf chunks:
@@ -284,7 +287,7 @@ public class NettyOutboundTest {
 		};
 		Path path = Paths.get(getClass().getResource("/largeFile.txt").toURI());
 
-		channel.writeOneOutbound(1);
+		ChannelFuture f = channel.writeOneOutbound(1);
 		outbound.sendFileChunked(path, 0, Files.size(path))
 		        .then().block();
 
@@ -304,6 +307,7 @@ public class NettyOutboundTest {
 				.startsWith("<- 1024 mark here")
 				.endsWith("End of File");
 
+		assertThat(f.isSuccess()).isTrue();
 		assertThat(channel.finishAndReleaseAll()).isTrue();
 	}
 

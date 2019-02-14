@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -31,6 +32,9 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.cookie.ClientCookieDecoder;
+import io.netty.handler.codec.http.cookie.ClientCookieEncoder;
+import io.netty.handler.codec.http.cookie.Cookie;
 import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslContext;
 import org.reactivestreams.Publisher;
@@ -42,7 +46,9 @@ import reactor.netty.ByteBufMono;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.NettyOutbound;
+import reactor.netty.NettyPipeline;
 import reactor.netty.channel.BootstrapHandlers;
+import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.HttpResources;
 import reactor.netty.http.websocket.WebsocketInbound;
 import reactor.netty.http.websocket.WebsocketOutbound;
@@ -263,6 +269,17 @@ public abstract class HttpClient {
 	 * {@link Publisher#subscribe(Subscriber)}.
 	 */
 	public interface WebsocketReceiver<S extends WebsocketReceiver<?>> extends UriConfiguration<S>  {
+		/**
+		 * Negotiate a websocket upgrade and return a {@link Mono} of {@link Connection}. If
+		 * {@link Mono} is cancelled, the underlying connection will be aborted. Once the
+		 * {@link Connection} has been emitted and is not necessary anymore, disposing must be
+		 * done by the user via {@link Connection#dispose()}.
+		 *
+		 * If update configuration phase fails, a {@link Mono#error(Throwable)} will be returned
+		 *
+		 * @return a {@link Mono} of {@link Connection}
+		 */
+		Mono<? extends Connection> connect();
 
 		/**
 		 * Negotiate a websocket upgrade and extract a flux from the given
@@ -365,30 +382,111 @@ public abstract class HttpClient {
 	}
 
 	/**
-	 * Enable gzip compression
+	 * Specifies whether GZip compression/websocket compression
+	 * extension is enabled.
 	 *
+	 * @param compressionEnabled if true GZip compression/websocket compression extension
+	 *                              is enabled otherwise disabled (default: false)
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient compress() {
-		return tcpConfiguration(COMPRESS_ATTR_CONFIG).headers(COMPRESS_HEADERS);
+	public final HttpClient compress(boolean compressionEnabled) {
+		if (compressionEnabled) {
+			return tcpConfiguration(COMPRESS_ATTR_CONFIG).headers(COMPRESS_HEADERS);
+		}
+		else {
+			return tcpConfiguration(COMPRESS_ATTR_DISABLE).headers(COMPRESS_HEADERS_DISABLE);
+		}
 	}
 
 	/**
-	 * Enable http status 301/302 auto-redirect support
+	 * Intercept the connection lifecycle and allows to delay, transform or inject a
+	 * context.
+	 *
+	 * @param connector A bi function mapping the default connection and configured
+	 * bootstrap to a target connection.
 	 *
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient followRedirect() {
-		return tcpConfiguration(FOLLOW_REDIRECT_ATTR_CONFIG);
+	public final HttpClient mapConnect(BiFunction<? super Mono<? extends Connection>, ? super Bootstrap, ? extends Mono<? extends Connection>> connector) {
+		return new HttpClientOnConnectMap(this, connector);
 	}
 
 	/**
-	 * Enable transfer-encoding
+	 * Specifies whether transfer-encoding is enabled
+	 *
+	 * @param chunkedEnabled if true transfer-encoding is enabled otherwise disabled.
+	 * (default: true)
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient chunkedTransfer(boolean chunkedEnabled) {
+		if (chunkedEnabled) {
+			return tcpConfiguration(CHUNKED_ATTR_CONFIG);
+		}
+		else {
+			return tcpConfiguration(CHUNKED_ATTR_DISABLE);
+		}
+	}
+
+	/**
+	 * Apply cookies configuration.
+	 *
+	 * @param cookie a cookie to append to the request(s)
 	 *
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient chunkedTransfer() {
-		return tcpConfiguration(CHUNKED_ATTR_CONFIG);
+	public final HttpClient cookie(Cookie cookie) {
+		return new HttpClientCookie(this, cookie);
+	}
+
+	/**
+	 * Apply cookies configuration.
+	 *
+	 * @param cookieBuilder the header {@link Consumer} to invoke before requesting
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient cookie(String name, Consumer<? super Cookie> cookieBuilder) {
+		return new HttpClientCookie(this, name, cookieBuilder);
+	}
+
+	/**
+	 * Apply cookies configuration emitted by the returned Mono before requesting.
+	 *
+	 * @param cookieBuilder the cookies {@link Function} to invoke before sending
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient cookiesWhen(String name, Function<? super Cookie, Mono<? extends Cookie>> cookieBuilder) {
+		return new HttpClientCookieWhen(this, name, cookieBuilder);
+	}
+
+	/**
+	 * Configure the
+	 * {@link ClientCookieEncoder}, {@link ClientCookieDecoder} will be
+	 * chosen based on the encoder
+	 *
+	 * @param encoder the preferred ClientCookieEncoder
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient cookieCodec(ClientCookieEncoder encoder) {
+		ClientCookieDecoder decoder = encoder == ClientCookieEncoder.LAX ?
+				ClientCookieDecoder.LAX : ClientCookieDecoder.STRICT;
+		return cookieCodec(encoder, decoder);
+	}
+
+	/**
+	 * Configure the
+	 * {@link ClientCookieEncoder} and {@link ClientCookieDecoder}
+	 *
+	 * @param encoder the preferred ClientCookieEncoder
+	 * @param decoder the preferred ClientCookieDecoder
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient cookieCodec(ClientCookieEncoder encoder, ClientCookieDecoder decoder) {
+		return tcpConfiguration(tcp -> tcp.bootstrap(
+				b -> HttpClientConfiguration.cookieCodec(b, encoder, decoder)));
 	}
 
 	/**
@@ -401,6 +499,27 @@ public abstract class HttpClient {
 	}
 
 	/**
+	 * Setup a callback called when {@link HttpClientRequest} has not been sent and when {@link HttpClientResponse} has not been fully
+	 * received.
+	 * <p>
+	 * Note that some mutation of {@link HttpClientRequest} performed late in lifecycle
+	 * {@link #doOnRequest(BiConsumer)} or {@link RequestSender#send(BiFunction)} might
+	 * not be visible if the error results from a connection failure.
+	 *
+	 * @param doOnRequest a consumer observing connected events
+	 * @param doOnResponse a consumer observing response failures
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient doOnError(BiConsumer<? super HttpClientRequest, ? super Throwable> doOnRequest,
+			BiConsumer<? super HttpClientResponse, ? super Throwable> doOnResponse) {
+		Objects.requireNonNull(doOnRequest, "doOnRequest");
+		Objects.requireNonNull(doOnResponse, "doOnResponse");
+		return new HttpClientDoOnError(this, doOnRequest, doOnResponse);
+	}
+
+
+	/**
 	 * Setup a callback called when {@link HttpClientRequest} is about to be sent.
 	 *
 	 * @param doOnRequest a consumer observing connected events
@@ -408,7 +527,23 @@ public abstract class HttpClient {
 	 * @return a new {@link HttpClient}
 	 */
 	public final HttpClient doOnRequest(BiConsumer<? super HttpClientRequest, ? super Connection> doOnRequest) {
+		Objects.requireNonNull(doOnRequest, "doOnRequest");
 		return new HttpClientDoOn(this, doOnRequest, null, null, null);
+	}
+
+	/**
+	 * Setup a callback called when {@link HttpClientRequest} has not been sent.
+	 * Note that some mutation of {@link HttpClientRequest} performed late in lifecycle
+	 * {@link #doOnRequest(BiConsumer)} or {@link RequestSender#send(BiFunction)} might
+	 * not be visible if the error results from a connection failure.
+	 *
+	 * @param doOnRequest a consumer observing connected events
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient doOnRequestError(BiConsumer<? super HttpClientRequest, ? super Throwable> doOnRequest) {
+		Objects.requireNonNull(doOnRequest, "doOnRequest");
+		return new HttpClientDoOnError(this, doOnRequest, null);
 	}
 
 	/**
@@ -419,6 +554,7 @@ public abstract class HttpClient {
 	 * @return a new {@link HttpClient}
 	 */
 	public final HttpClient doAfterRequest(BiConsumer<? super HttpClientRequest, ? super Connection> doAfterRequest) {
+		Objects.requireNonNull(doAfterRequest, "doAfterRequest");
 		return new HttpClientDoOn(this, null, doAfterRequest, null, null);
 	}
 
@@ -431,7 +567,21 @@ public abstract class HttpClient {
 	 * @return a new {@link HttpClient}
 	 */
 	public final HttpClient doOnResponse(BiConsumer<? super HttpClientResponse, ? super Connection> doOnResponse) {
+		Objects.requireNonNull(doOnResponse, "doOnResponse");
 		return new HttpClientDoOn(this, null, null, doOnResponse, null);
+	}
+
+	/**
+	 * Setup a callback called when {@link HttpClientResponse} has not been fully
+	 * received.
+	 *
+	 * @param doOnResponse a consumer observing response failures
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient doOnResponseError(BiConsumer<? super HttpClientResponse, ? super Throwable> doOnResponse) {
+		Objects.requireNonNull(doOnResponse, "doOnResponse");
+		return new HttpClientDoOnError(this, null, doOnResponse);
 	}
 
 	/**
@@ -442,6 +592,7 @@ public abstract class HttpClient {
 	 * @return a new {@link HttpClient}
 	 */
 	public final HttpClient doAfterResponse(BiConsumer<? super HttpClientResponse, ? super Connection> doAfterResponse) {
+		Objects.requireNonNull(doAfterResponse, "doAfterResponse");
 		return new HttpClientDoOn(this, null, null, null, doAfterResponse);
 	}
 
@@ -466,8 +617,7 @@ public abstract class HttpClient {
 	/**
 	 * Apply headers configuration.
 	 *
-	 * @param headerBuilder the header {@link Consumer} to invoke before sending
-	 * websocket handshake
+	 * @param headerBuilder the header {@link Consumer} to invoke before requesting
 	 *
 	 * @return a new {@link HttpClient}
 	 */
@@ -476,30 +626,63 @@ public abstract class HttpClient {
 	}
 
 	/**
-	 * Disable gzip compression
+	 * Apply headers configuration emitted by the returned Mono before requesting.
+	 *
+	 * @param headerBuilder the header {@link Function} to invoke before sending
 	 *
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient noCompression() {
-		return tcpConfiguration(COMPRESS_ATTR_DISABLE).headers(COMPRESS_HEADERS_DISABLE);
+	public final HttpClient headersWhen(Function<? super HttpHeaders, Mono<? extends HttpHeaders>> headerBuilder) {
+		return new HttpClientHeadersWhen(this, headerBuilder);
 	}
 
 	/**
-	 * Disable http status 301/302 auto-redirect support
+	 * Enable or Disable Keep-Alive support for the outgoing request.
+	 *
+	 * @param keepAlive true if keepAlive should be enabled (default: true)
 	 *
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient noRedirection() {
-		return tcpConfiguration(FOLLOW_REDIRECT_ATTR_DISABLE);
+	public final HttpClient keepAlive(boolean keepAlive) {
+		if (keepAlive) {
+			return tcpConfiguration(KEEPALIVE_ATTR_CONFIG);
+		}
+		else {
+			return tcpConfiguration(KEEPALIVE_ATTR_DISABLE);
+		}
 	}
 
 	/**
-	 * Disable transfer-encoding
+	 * Specifies whether http status 301|302|307|308 auto-redirect support is enabled
 	 *
+	 * @param followRedirect if true http status 301/302 auto-redirect support
+	 *                       is enabled otherwise disabled (default: true)
 	 * @return a new {@link HttpClient}
 	 */
-	public final HttpClient noChunkedTransfer() {
-		return tcpConfiguration(CHUNKED_ATTR_DISABLE);
+	public final HttpClient followRedirect(boolean followRedirect) {
+		if (followRedirect) {
+			return tcpConfiguration(FOLLOW_REDIRECT_ATTR_CONFIG);
+		}
+		else {
+			return tcpConfiguration(FOLLOW_REDIRECT_ATTR_DISABLE);
+		}
+	}
+
+	/**
+	 * Enables auto-redirect support if the passed
+	 * {@link java.util.function.Predicate} matches.
+	 * <p>
+	 *     note the passed {@link HttpClientRequest} and {@link HttpClientResponse}
+	 *     should be considered read-only and the implement SHOULD NOT consume or
+	 *     write the request/response in this predicate.
+	 *
+	 * @param predicate that returns true to enable auto-redirect support.
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient followRedirect(BiPredicate<HttpClientRequest, HttpClientResponse> predicate) {
+		Objects.requireNonNull(predicate, "predicate");
+		return tcpConfiguration(tcp -> tcp.bootstrap(
+				b -> HttpClientConfiguration.followRedirectPredicate(b, predicate)));
 	}
 
 	/**
@@ -533,15 +716,6 @@ public abstract class HttpClient {
 	}
 
 	/**
-	 * HTTP POST to connect the {@link HttpClient}.
-	 *
-	 * @return a {@link RequestSender} ready to finalize request and consume for response
-	 */
-	public final RequestSender post() {
-		return request(HttpMethod.POST);
-	}
-
-	/**
 	 * The port to which this client should connect.
 	 *
 	 * @param port The port to connect to.
@@ -551,6 +725,28 @@ public abstract class HttpClient {
 	public final HttpClient port(int port) {
 		return tcpConfiguration(tcpClient -> tcpClient.port(port));
 	}
+
+	/**
+	 * HTTP POST to connect the {@link HttpClient}.
+	 *
+	 * @return a {@link RequestSender} ready to finalize request and consume for response
+	 */
+	public final RequestSender post() {
+		return request(HttpMethod.POST);
+	}
+
+
+	/**
+	 * The HTTP protocol to support. Default is {@link HttpProtocol#HTTP11}.
+	 *
+	 * @param supportedProtocols The various {@link HttpProtocol} this server will support
+	 *
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient protocol(HttpProtocol... supportedProtocols) {
+		return tcpConfiguration(tcpClient -> tcpClient.bootstrap(b -> HttpClientConfiguration.protocols(b, supportedProtocols)));
+	}
+
 
 	/**
 	 * HTTP PUT to connect the {@link HttpClient}.
@@ -624,9 +820,30 @@ public abstract class HttpClient {
 	 * and {@code DEBUG} logger level
 	 *
 	 * @return a new {@link HttpClient}
+	 * @deprecated Use {@link HttpClient#wiretap(boolean)}
 	 */
+	@Deprecated
 	public final HttpClient wiretap() {
-		return tcpConfiguration(tcpClient -> tcpClient.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+		return tcpConfiguration(tcpClient -> tcpClient.bootstrap(
+		        b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+	}
+
+	/**
+	 * Apply or remove a wire logger configuration using {@link HttpClient} category
+	 * and {@code DEBUG} logger level
+	 *
+	 * @param enable Specifies whether the wire logger configuration will be added to
+	 *               the pipeline
+	 * @return a new {@link HttpClient}
+	 */
+	public final HttpClient wiretap(boolean enable) {
+		if (enable) {
+			return tcpConfiguration(tcpClient -> tcpClient.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+		}
+		else {
+			return tcpConfiguration(tcpClient -> tcpClient.bootstrap(
+			        b -> BootstrapHandlers.removeConfiguration(b, NettyPipeline.LoggingHandler)));
+		}
 	}
 
 	/**
@@ -646,11 +863,35 @@ public abstract class HttpClient {
 	 * @return a {@link WebsocketSender} ready to consume for response
 	 */
 	public final WebsocketSender websocket(String subprotocols) {
-		Objects.requireNonNull(subprotocols, "subprotocols");
-		TcpClient tcpConfiguration = tcpConfiguration().bootstrap(b -> HttpClientConfiguration.websocketSubprotocols(b, subprotocols));
-		return new WebsocketFinalizer(tcpConfiguration);
+		return websocket(subprotocols, 65536);
 	}
 
+	/**
+	 * HTTP Websocket to connect the {@link HttpClient}.
+	 *
+	 * @param maxFramePayloadLength maximum allowable frame payload length
+	 *
+	 * @return a {@link WebsocketSender} ready to consume for response
+	 */
+	public final WebsocketSender websocket(int maxFramePayloadLength) {
+		return websocket("", maxFramePayloadLength);
+	}
+
+	/**
+	 * HTTP Websocket to connect the {@link HttpClient}.
+	 *
+	 * @param subprotocols a websocket subprotocol comma separated list
+	 * @param maxFramePayloadLength maximum allowable frame payload length
+	 *
+	 * @return a {@link WebsocketSender} ready to consume for response
+	 */
+	public final WebsocketSender websocket(String subprotocols, int maxFramePayloadLength) {
+		Objects.requireNonNull(subprotocols, "subprotocols");
+		TcpClient tcpConfiguration = tcpConfiguration()
+				.bootstrap(b -> HttpClientConfiguration.websocketSubprotocols(b, subprotocols))
+				.bootstrap(b -> HttpClientConfiguration.websocketMaxFramePayloadLength(b, maxFramePayloadLength));
+		return new WebsocketFinalizer(tcpConfiguration);
+	}
 
 	/**
 	 * Get a TcpClient from the parent {@link HttpClient} chain to use with {@link
@@ -661,7 +902,6 @@ public abstract class HttpClient {
 	protected TcpClient tcpConfiguration() {
 		return DEFAULT_TCP_CLIENT;
 	}
-
 
 	static String reactorNettyVersion() {
 		return Optional.ofNullable(HttpClient.class.getPackage()
@@ -679,26 +919,32 @@ public abstract class HttpClient {
 
 	static final LoggingHandler LOGGING_HANDLER = new LoggingHandler(HttpClient.class);
 
-	static final Function<TcpClient, TcpClient> COMPRESS_ATTR_CONFIG         =
+	static final Function<TcpClient, TcpClient> COMPRESS_ATTR_CONFIG =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_COMPRESS);
 
-	static final Function<TcpClient, TcpClient> COMPRESS_ATTR_DISABLE        =
+	static final Function<TcpClient, TcpClient> COMPRESS_ATTR_DISABLE =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_NO_COMPRESS);
 
-	static final Function<TcpClient, TcpClient> CHUNKED_ATTR_CONFIG          =
+	static final Function<TcpClient, TcpClient> CHUNKED_ATTR_CONFIG =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_CHUNKED);
 
-	static final Function<TcpClient, TcpClient> CHUNKED_ATTR_DISABLE         =
+	static final Function<TcpClient, TcpClient> KEEPALIVE_ATTR_CONFIG =
+			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_KEEPALIVE);
+
+	static final Function<TcpClient, TcpClient> KEEPALIVE_ATTR_DISABLE =
+			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_NO_KEEPALIVE);
+
+	static final Function<TcpClient, TcpClient> CHUNKED_ATTR_DISABLE =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_NO_CHUNKED);
 
-	static final Function<TcpClient, TcpClient> FOLLOW_REDIRECT_ATTR_CONFIG  =
+	static final Function<TcpClient, TcpClient> FOLLOW_REDIRECT_ATTR_CONFIG =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_REDIRECT);
 
 	static final Function<TcpClient, TcpClient> FOLLOW_REDIRECT_ATTR_DISABLE =
 			tcp -> tcp.bootstrap(HttpClientConfiguration.MAP_NO_REDIRECT);
 
-	static final Consumer<? super HttpHeaders> COMPRESS_HEADERS = h ->
-			h.add(HttpHeaderNames.ACCEPT_ENCODING, HttpHeaderValues.GZIP);
+	static final Consumer<? super HttpHeaders> COMPRESS_HEADERS =
+			h -> h.add(HttpHeaderNames.ACCEPT_ENCODING, HttpHeaderValues.GZIP);
 
 	static final Consumer<? super HttpHeaders> COMPRESS_HEADERS_DISABLE = h -> {
 		if (isCompressing(h)) {
@@ -709,4 +955,5 @@ public abstract class HttpClient {
 	static boolean isCompressing(HttpHeaders h){
 		return h.contains(HttpHeaderNames.ACCEPT_ENCODING, HttpHeaderValues.GZIP, true);
 	}
+
 }

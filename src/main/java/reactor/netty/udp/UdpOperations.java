@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ import reactor.netty.channel.ChannelOperations;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -71,7 +71,11 @@ final class UdpOperations extends ChannelOperations<UdpInbound, UdpOutbound>
 		}
 
 		return FutureMono.from(future)
-		                 .doOnSuccess(v -> log.info(format(future.channel(), "JOIN {}"), multicastAddress));
+		                 .doOnSuccess(v -> {
+		                     if (log.isInfoEnabled()) {
+		                         log.info(format(future.channel(), "JOIN {}"), multicastAddress);
+		                     }
+		                 });
 	}
 
 	/**
@@ -98,7 +102,11 @@ final class UdpOperations extends ChannelOperations<UdpInbound, UdpOutbound>
 		}
 
 		return FutureMono.from(future)
-		                 .doOnSuccess(v -> log.info(format(future.channel(), "JOIN {}"), multicastAddress));
+		                 .doOnSuccess(v -> {
+		                     if (log.isInfoEnabled()) {
+		                         log.info(format(future.channel(), "JOIN {}"), multicastAddress);
+		                     }
+		                 });
 	}
 
 	static final Logger log = Loggers.getLogger(UdpOperations.class);

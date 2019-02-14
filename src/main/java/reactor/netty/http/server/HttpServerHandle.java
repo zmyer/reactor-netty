@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ import reactor.netty.ConnectionObserver;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.tcp.TcpServer;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -54,7 +54,7 @@ final class HttpServerHandle extends HttpServerOperator implements ConnectionObs
 	@Override
 	@SuppressWarnings("unchecked")
 	public void onStateChange(Connection connection, State newState) {
-		if (newState == State.CONFIGURED) {
+		if (newState == HttpServerState.REQUEST_RECEIVED) {
 			try {
 				if (log.isDebugEnabled()) {
 					log.debug(format(connection.channel(), "Handler is being applied: {}"), handler);

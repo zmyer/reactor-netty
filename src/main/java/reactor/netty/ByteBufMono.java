@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
+import io.netty.util.IllegalReferenceCountException;
 import reactor.core.CoreSubscriber;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoOperator;
@@ -42,7 +43,14 @@ public final class ByteBufMono extends MonoOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link ByteBuffer} inbound {@link Mono}
 	 */
 	public final Mono<ByteBuffer> asByteBuffer() {
-		return map(ByteBuf::nioBuffer);
+		return handle((bb, sink) -> {
+			try {
+				sink.next(bb.nioBuffer());
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**
@@ -51,10 +59,15 @@ public final class ByteBufMono extends MonoOperator<ByteBuf, ByteBuf> {
 	 * @return a {@literal byte[]} inbound {@link Mono}
 	 */
 	public final Mono<byte[]> asByteArray() {
-		return map(bb -> {
-			byte[] bytes = new byte[bb.readableBytes()];
-			bb.readBytes(bytes);
-			return bytes;
+		return handle((bb, sink) -> {
+			try {
+				byte[] bytes = new byte[bb.readableBytes()];
+				bb.readBytes(bytes);
+				sink.next(bytes);
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
 		});
 	}
 
@@ -75,7 +88,14 @@ public final class ByteBufMono extends MonoOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link String} inbound {@link Mono}
 	 */
 	public final Mono<String> asString(Charset charset) {
-		return map(s -> s.toString(charset));
+		return handle((bb, sink) -> {
+			try {
+				sink.next(bb.readCharSequence(bb.readableBytes(), charset).toString());
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**
@@ -84,7 +104,14 @@ public final class ByteBufMono extends MonoOperator<ByteBuf, ByteBuf> {
 	 * @return a {@link InputStream} inbound {@link Mono}
 	 */
 	public Mono<InputStream> asInputStream() {
-		return map(ReleasingInputStream::new);
+		return handle((bb, sink) -> {
+			try {
+				sink.next(new ReleasingInputStream(bb));
+			}
+			catch (IllegalReferenceCountException e) {
+				sink.complete();
+			}
+		});
 	}
 
 	/**

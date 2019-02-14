@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ final class WebsocketFinalizer extends HttpClient implements HttpClient.Websocke
 
 	@Override
 	public WebsocketSender uri(Mono<String> uri) {
-		return new WebsocketFinalizer(cachedConfiguration.bootstrap(b -> HttpClientConfiguration.deferredUri(b, uri)));
+		return new WebsocketFinalizer(cachedConfiguration.bootstrap(b -> HttpClientConfiguration.deferredConf(b, conf -> uri.map(conf::uri))));
 	}
 
 	// WebsocketSender methods
@@ -58,8 +58,9 @@ final class WebsocketFinalizer extends HttpClient implements HttpClient.Websocke
 		return new WebsocketFinalizer(cachedConfiguration.bootstrap(b -> HttpClientConfiguration.body(b, (req, out) -> sender.apply(req))));
 	}
 
+	@Override
 	@SuppressWarnings("unchecked")
-	Mono<WebsocketClientOperations> connect() {
+	public Mono<WebsocketClientOperations> connect() {
 		return (Mono<WebsocketClientOperations>)cachedConfiguration.connect();
 	}
 
@@ -70,7 +71,8 @@ final class WebsocketFinalizer extends HttpClient implements HttpClient.Websocke
 
 	@Override
 	public <V> Flux<V> handle(BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<V>> receiver) {
-		return connect().flatMapMany(c -> Flux.from(receiver.apply(c, c)));
+		return connect().flatMapMany(c -> Flux.from(receiver.apply(c, c))
+		                                      .doFinally(s -> HttpClientFinalizer.discard(c)));
 	}
 }
 

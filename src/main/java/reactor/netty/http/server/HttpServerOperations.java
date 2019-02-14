@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,9 +50,13 @@ import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.codec.http.cookie.Cookie;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
 import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.util.AsciiString;
+import io.netty.util.ReferenceCountUtil;
 import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.netty.Connection;
@@ -67,9 +71,10 @@ import reactor.netty.http.websocket.WebsocketInbound;
 import reactor.netty.http.websocket.WebsocketOutbound;
 import reactor.util.Logger;
 import reactor.util.Loggers;
+import reactor.util.context.Context;
 
 import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * Conversion between Netty types  and Reactor types ({@link HttpOperations}.
@@ -84,6 +89,8 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	final Cookies     cookieHolder;
 	final HttpRequest nettyRequest;
 	final ConnectionInfo connectionInfo;
+	final ServerCookieEncoder cookieEncoder;
+	final ServerCookieDecoder cookieDecoder;
 
 	final BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate;
 
@@ -98,20 +105,26 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		this.paramsResolver = replaced.paramsResolver;
 		this.nettyRequest = replaced.nettyRequest;
 		this.compressionPredicate = replaced.compressionPredicate;
+		this.cookieEncoder = replaced.cookieEncoder;
+		this.cookieDecoder = replaced.cookieDecoder;
 	}
 
 	HttpServerOperations(Connection c,
 			ConnectionObserver listener,
 			@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressionPredicate,
 			HttpRequest nettyRequest,
-			ConnectionInfo connectionInfo) {
+			ConnectionInfo connectionInfo,
+			ServerCookieEncoder encoder,
+			ServerCookieDecoder decoder) {
 		super(c, listener);
 		this.nettyRequest = nettyRequest;
 		this.nettyResponse = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
 		this.responseHeaders = nettyResponse.headers();
 		this.compressionPredicate = compressionPredicate;
-		this.cookieHolder = Cookies.newServerRequestHolder(requestHeaders());
+		this.cookieHolder = Cookies.newServerRequestHolder(requestHeaders(), decoder);
 		this.connectionInfo = connectionInfo;
+		this.cookieEncoder = encoder;
+		this.cookieDecoder = decoder;
 	}
 
 	@Override
@@ -136,13 +149,14 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 				new DefaultFullHttpResponse(version(), status(), EMPTY_BUFFER);
 
 		if (!HttpMethod.HEAD.equals(method())) {
-			res.headers()
-			   .set(responseHeaders.remove(HttpHeaderNames.TRANSFER_ENCODING)
-			                       .setInt(HttpHeaderNames.CONTENT_LENGTH, 0));
+			responseHeaders.remove(HttpHeaderNames.TRANSFER_ENCODING);
+			if (!HttpResponseStatus.NOT_MODIFIED.equals(status())) {
+				responseHeaders.setInt(HttpHeaderNames.CONTENT_LENGTH, 0);
+			}
 		}
-		else {
-			res.headers().set(responseHeaders);
-		}
+
+		res.headers().set(responseHeaders);
+
 		markPersistent(true);
 		return res;
 	}
@@ -151,7 +165,7 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	public HttpServerResponse addCookie(Cookie cookie) {
 		if (!hasSentHeaders()) {
 			this.responseHeaders.add(HttpHeaderNames.SET_COOKIE,
-					ServerCookieEncoder.STRICT.encode(cookie));
+					cookieEncoder.encode(cookie));
 		}
 		else {
 			throw new IllegalStateException("Status and headers already sent");
@@ -372,8 +386,9 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 
 	@Override
 	public Mono<Void> sendWebsocket(@Nullable String protocols,
+			int maxFramePayloadLength,
 			BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<Void>> websocketHandler) {
-		return withWebsocketSupport(uri(), protocols, websocketHandler);
+		return withWebsocketSupport(uri(), protocols, maxFramePayloadLength, websocketHandler);
 	}
 
 	@Override
@@ -417,7 +432,14 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	@Override
 	protected void onInboundNext(ChannelHandlerContext ctx, Object msg) {
 		if (msg instanceof HttpRequest) {
-			listener().onStateChange(this, ConnectionObserver.State.CONFIGURED);
+			try {
+				listener().onStateChange(this, HttpServerState.REQUEST_RECEIVED);
+			}
+			catch (Exception e) {
+				onInboundError(e);
+				ReferenceCountUtil.release(msg);
+				return;
+			}
 			if (msg instanceof FullHttpRequest) {
 				super.onInboundNext(ctx, msg);
 			}
@@ -441,6 +463,10 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		if (!HttpUtil.isTransferEncodingChunked(nettyResponse) && !HttpUtil.isContentLengthSet(
 				nettyResponse)) {
 			markPersistent(false);
+		}
+		if (HttpResponseStatus.NOT_MODIFIED.equals(status())) {
+			responseHeaders.remove(HttpHeaderNames.TRANSFER_ENCODING)
+			               .remove(HttpHeaderNames.CONTENT_LENGTH);
 		}
 		if (compressionPredicate != null && compressionPredicate.test(this, this)) {
 			compression(true);
@@ -525,28 +551,70 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 
 	final Mono<Void> withWebsocketSupport(String url,
 			@Nullable String protocols,
+			int maxFramePayloadLength,
 			BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<Void>> websocketHandler) {
 		Objects.requireNonNull(websocketHandler, "websocketHandler");
 		if (markSentHeaders()) {
 			WebsocketServerOperations
-					ops = new WebsocketServerOperations(url, protocols, this);
+					ops = new WebsocketServerOperations(url, protocols, maxFramePayloadLength, this);
 
 			if (rebind(ops)) {
 				return FutureMono.from(ops.handshakerResult)
-				                 .then(Mono.defer(() -> {
-					                 //skip handler if no matching subprotocol
-					                 if (protocols != null && ops.selectedSubprotocol() == null) {
-						                 return Mono.empty();
-					                 }
-					                 return Mono.fromDirect(websocketHandler.apply(ops, ops));
-				                 }))
-				                 .doAfterSuccessOrError(ops);
+				                 .doOnEach(signal -> {
+				                 	if(!signal.hasError() && (protocols == null || ops.selectedSubprotocol() != null)) {
+					                    websocketHandler.apply(ops, ops)
+					                                    .subscribe(new WebsocketSubscriber(ops, signal.getContext()));
+				                    }
+				                 });
 			}
 		}
 		else {
 			log.error(format(channel(), "Cannot enable websocket if headers have already been sent"));
 		}
 		return Mono.error(new IllegalStateException("Failed to upgrade to websocket"));
+	}
+
+	static final class WebsocketSubscriber implements CoreSubscriber<Void>, ChannelFutureListener {
+		final WebsocketServerOperations ops;
+		final Context                context;
+
+		WebsocketSubscriber(WebsocketServerOperations ops, Context context) {
+			this.ops = ops;
+			this.context = context;
+		}
+
+		@Override
+		public void onSubscribe(Subscription s) {
+			s.request(Long.MAX_VALUE);
+		}
+
+		@Override
+		public void onNext(Void aVoid) {
+
+		}
+
+		@Override
+		public void onError(Throwable t) {
+			ops.onOutboundError(t);
+		}
+
+		@Override
+		public void operationComplete(ChannelFuture future)  {
+			ops.terminate();
+		}
+
+		@Override
+		public void onComplete() {
+			if (ops.channel()
+			       .isActive()) {
+				ops.sendCloseNow(null, this);
+			}
+		}
+
+		@Override
+		public Context currentContext() {
+			return context;
+		}
 	}
 
 	static final Logger log = Loggers.getLogger(HttpServerOperations.class);

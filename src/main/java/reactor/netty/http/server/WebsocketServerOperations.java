@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package reactor.netty.http.server;
 
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.function.BiConsumer;
 import javax.annotation.Nullable;
 
 import io.netty.channel.Channel;
@@ -35,14 +34,16 @@ import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketServerHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketServerHandshakerFactory;
+import io.netty.handler.codec.http.websocketx.extensions.compression.WebSocketServerCompressionHandler;
 import reactor.core.publisher.Mono;
 import reactor.netty.FutureMono;
 import reactor.netty.NettyPipeline;
+import reactor.netty.ReactorNetty;
 import reactor.netty.http.HttpOperations;
 import reactor.netty.http.websocket.WebsocketInbound;
 import reactor.netty.http.websocket.WebsocketOutbound;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * Conversion between Netty types  and Reactor types ({@link HttpOperations}
@@ -51,7 +52,7 @@ import static reactor.netty.LogFormatter.format;
  * @author Simon Baslé
  */
 final class WebsocketServerOperations extends HttpServerOperations
-		implements WebsocketInbound, WebsocketOutbound, BiConsumer<Void, Throwable> {
+		implements WebsocketInbound, WebsocketOutbound {
 
 	final WebSocketServerHandshaker handshaker;
 	final ChannelPromise            handshakerResult;
@@ -60,6 +61,7 @@ final class WebsocketServerOperations extends HttpServerOperations
 
 	WebsocketServerOperations(String wsUrl,
 			@Nullable String protocols,
+			int maxFramePayloadLength,
 			HttpServerOperations replaced) {
 		super(replaced);
 
@@ -67,7 +69,7 @@ final class WebsocketServerOperations extends HttpServerOperations
 
 		// Handshake
 		WebSocketServerHandshakerFactory wsFactory =
-				new WebSocketServerHandshakerFactory(wsUrl, protocols, true);
+				new WebSocketServerHandshakerFactory(wsUrl, protocols, true, maxFramePayloadLength);
 		handshaker = wsFactory.newHandshaker(replaced.nettyRequest);
 		if (handshaker == null) {
 			WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(channel);
@@ -83,6 +85,23 @@ final class WebsocketServerOperations extends HttpServerOperations
 
 			request.headers()
 			       .set(replaced.nettyRequest.headers());
+
+			if (channel().pipeline()
+			             .get(NettyPipeline.CompressionHandler) != null) {
+				removeHandler(NettyPipeline.CompressionHandler);
+
+				WebSocketServerCompressionHandler wsServerCompressionHandler =
+						new WebSocketServerCompressionHandler();
+				try {
+					wsServerCompressionHandler.channelRead(channel.pipeline()
+					                                              .context(NettyPipeline.ReactiveBridge),
+							request);
+
+					addHandlerFirst(NettyPipeline.WsCompressionHandler, wsServerCompressionHandler);
+				} catch (Throwable e) {
+					log.error(format(channel(), ""), e);
+				}
+			}
 
 			handshaker.handshake(channel,
 					request,
@@ -126,18 +145,6 @@ final class WebsocketServerOperations extends HttpServerOperations
 	}
 
 	@Override
-	public void accept(Void aVoid, Throwable throwable) {
-		if (throwable == null) {
-			if (channel().isActive()) {
-				sendCloseNow(null, f -> terminate());
-			}
-		}
-		else {
-			onOutboundError(throwable);
-		}
-	}
-
-	@Override
 	protected void onOutboundError(Throwable err) {
 		if (channel().isActive()) {
 			sendCloseNow(new CloseWebSocketFrame(1002, "Server internal error"), f ->
@@ -167,14 +174,19 @@ final class WebsocketServerOperations extends HttpServerOperations
 
 	Mono<Void> sendClose(CloseWebSocketFrame frame) {
 		if (CLOSE_SENT.get(this) == 0) {
+			onTerminate().subscribe(null, null, () -> ReactorNetty.safeRelease(frame));
 			return FutureMono.deferFuture(() -> {
 				if (CLOSE_SENT.getAndSet(this, 1) == 0) {
+					discard();
+					channel().pipeline().remove(NettyPipeline.ReactiveBridge);
 					return channel().writeAndFlush(frame)
 					                .addListener(ChannelFutureListener.CLOSE);
 				}
+				frame.release();
 				return channel().newSucceededFuture();
 			});
 		}
+		frame.release();
 		return Mono.empty();
 	}
 
@@ -187,6 +199,9 @@ final class WebsocketServerOperations extends HttpServerOperations
 			ChannelFuture f = channel().writeAndFlush(
 					frame == null ? new CloseWebSocketFrame() : frame);
 			f.addListener(listener);
+		}
+		else if (frame != null) {
+			frame.release();
 		}
 	}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,16 @@
 
 package reactor.netty.resources;
 
+import java.net.SocketAddress;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.pool.FixedChannelPool;
 import io.netty.channel.pool.SimpleChannelPool;
 import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.netty.Connection;
-import reactor.netty.SystemPropertiesNames;
+import reactor.netty.ReactorNetty;
+import reactor.util.annotation.NonNull;
 
 /**
  * A {@link ConnectionProvider} will produce {@link Connection}
@@ -39,7 +42,7 @@ public interface ConnectionProvider extends Disposable {
 	 * available number of processors (but with a minimum value of 16)
 	 */
 	int DEFAULT_POOL_MAX_CONNECTIONS =
-			Integer.parseInt(System.getProperty(SystemPropertiesNames.POOL_MAX_CONNECTIONS,
+			Integer.parseInt(System.getProperty(ReactorNetty.POOL_MAX_CONNECTIONS,
 			"" + Math.max(Runtime.getRuntime()
 			            .availableProcessors(), 8) * 2));
 
@@ -49,7 +52,7 @@ public interface ConnectionProvider extends Disposable {
 	 * connection in an unbounded fashion. Fallback 45 seconds
 	 */
 	long DEFAULT_POOL_ACQUIRE_TIMEOUT = Long.parseLong(System.getProperty(
-			SystemPropertiesNames.POOL_ACQUIRE_TIMEOUT,
+			ReactorNetty.POOL_ACQUIRE_TIMEOUT,
 			"" + 45000));
 
 	/**
@@ -75,7 +78,12 @@ public interface ConnectionProvider extends Disposable {
 	 * {@link Connection}
 	 */
 	static ConnectionProvider elastic(String name) {
-		return new PooledConnectionProvider(name, SimpleChannelPool::new);
+		return new PooledConnectionProvider(name,
+				(bootstrap, handler, checker) -> new SimpleChannelPool(bootstrap,
+						handler,
+						checker,
+						true,
+						false));
 	}
 
 	/**
@@ -119,7 +127,7 @@ public interface ConnectionProvider extends Disposable {
 	 *
 	 * @param name the connection pool name
 	 * @param maxConnections the maximum number of connections before starting pending
-	 * @param acquireTimeout the maximum time in millis to wait for aquiring
+	 * @param acquireTimeout the maximum time in millis to wait for acquiring
 	 *
 	 * @return a new {@link ConnectionProvider} to cache and reuse a fixed maximum
 	 * number of {@link Connection}
@@ -141,8 +149,10 @@ public interface ConnectionProvider extends Disposable {
 						FixedChannelPool.AcquireTimeoutAction.FAIL,
 						acquireTimeout,
 						maxConnections,
-						Integer.MAX_VALUE
-						));
+						Integer.MAX_VALUE,
+						true,
+						false),
+				maxConnections);
 	}
 
 	/**
@@ -153,6 +163,10 @@ public interface ConnectionProvider extends Disposable {
 	 * @return an existing or new {@link Mono} of {@link Connection}
 	 */
 	Mono<? extends Connection> acquire(Bootstrap bootstrap);
+
+
+	default void disposeWhen(@NonNull SocketAddress address) {
+	}
 
 	@Override
 	default void dispose() {
@@ -167,5 +181,14 @@ public interface ConnectionProvider extends Disposable {
 	 **/
 	default Mono<Void> disposeLater() {
 		return Mono.empty(); //noop default
+	}
+
+	/**
+	 * Returns the maximum number of connections before starting pending
+	 *
+	 * @return the maximum number of connections before starting pending
+	 */
+	default int maxConnections() {
+		return -1;
 	}
 }

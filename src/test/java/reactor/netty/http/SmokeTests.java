@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -103,7 +103,7 @@ public class SmokeTests {
 	@After
 	public void clean() {
 		processor.onComplete();
-		httpServer.dispose();
+		httpServer.disposeNow();
 	}
 
 	public Sender newSender() {
@@ -295,7 +295,7 @@ public class SmokeTests {
 							                                                        response
 							                                                               .alloc())));
 		                       })
-		                       .wiretap()
+		                       .wiretap(true)
 		                       .bindNow();
 
 	}
@@ -304,7 +304,7 @@ public class SmokeTests {
 		HttpClient httpClient =
 				HttpClient.create()
 				          .port(httpServer.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		Mono<List<String>> content = httpClient.get()
 		                                       .uri("/data")

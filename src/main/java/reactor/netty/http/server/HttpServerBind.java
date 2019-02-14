@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpServerUpgradeHandler;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.handler.codec.http2.CleartextHttp2ServerUpgradeHandler;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2FrameLogger;
@@ -56,7 +58,8 @@ import reactor.netty.tcp.SslProvider;
 import reactor.netty.tcp.TcpServer;
 import reactor.util.annotation.Nullable;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.ACCESS_LOG_ENABLED;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -65,6 +68,11 @@ final class HttpServerBind extends HttpServer
 		implements Function<ServerBootstrap, ServerBootstrap> {
 
 	static final HttpServerBind INSTANCE = new HttpServerBind();
+
+	static final Function<DisposableServer, DisposableServer> CLEANUP_GLOBAL_RESOURCE = DisposableBind::new;
+
+	static final boolean ACCESS_LOG =
+			Boolean.parseBoolean(System.getProperty(ACCESS_LOG_ENABLED, "false"));
 
 	final TcpServer tcpServer;
 
@@ -85,7 +93,8 @@ final class HttpServerBind extends HttpServer
 	@SuppressWarnings("unchecked")
 	public Mono<? extends DisposableServer> bind(TcpServer delegate) {
 		return delegate.bootstrap(this)
-		               .bind();
+		               .bind()
+		               .map(CLEANUP_GLOBAL_RESOURCE);
 	}
 
 	@Override
@@ -94,16 +103,15 @@ final class HttpServerBind extends HttpServer
 
 		SslProvider ssl = SslProvider.findSslSupport(b);
 		if (ssl != null && ssl.getDefaultConfigurationType() == null) {
-			switch (conf.protocols) {
-				case HttpServerConfiguration.h11:
-					ssl = SslProvider.updateDefaultConfiguration(ssl, SslProvider.DefaultConfigurationType.HTTP11);
-					SslProvider.updateSslSupport(b, ssl);
-					break;
-				case HttpServerConfiguration.h2:
-					ssl = SslProvider.updateDefaultConfiguration(ssl, SslProvider.DefaultConfigurationType.H2);
-					SslProvider.updateSslSupport(b, ssl);
-					break;
-				default: break;
+			if ((conf.protocols & HttpServerConfiguration.h2) == HttpServerConfiguration.h2) {
+				ssl = SslProvider.updateDefaultConfiguration(ssl,
+						SslProvider.DefaultConfigurationType.H2);
+				SslProvider.setBootstrap(b, ssl);
+			}
+			else {
+				ssl = SslProvider.updateDefaultConfiguration(ssl,
+						SslProvider.DefaultConfigurationType.TCP);
+				SslProvider.setBootstrap(b, ssl);
 			}
 		}
 
@@ -141,7 +149,9 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.initialBufferSize,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 			if ((conf.protocols & HttpServerConfiguration.h11) == HttpServerConfiguration.h11) {
 				return BootstrapHandlers.updateConfiguration(b,
@@ -153,7 +163,9 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.initialBufferSize,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 			if ((conf.protocols & HttpServerConfiguration.h2) == HttpServerConfiguration.h2) {
 				return BootstrapHandlers.updateConfiguration(b,
@@ -162,13 +174,17 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.validateHeaders,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 		}
 		else {
 			if ((conf.protocols & HttpServerConfiguration.h2) == HttpServerConfiguration.h2) {
 				throw new IllegalArgumentException(
-						"Configured H2 protocol without TLS. Use" + " a clear-text h2 protocol via HttpServer#protocol or configure TLS" + " via HttpServer#secure");
+						"Configured H2 protocol without TLS. Use" +
+								" a clear-text h2 protocol via HttpServer#protocol or configure TLS" +
+								" via HttpServer#secure");
 			}
 			if ((conf.protocols & HttpServerConfiguration.h11orH2c) == HttpServerConfiguration.h11orH2c) {
 				return BootstrapHandlers.updateConfiguration(b,
@@ -180,7 +196,9 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.initialBufferSize,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 			if ((conf.protocols & HttpServerConfiguration.h11) == HttpServerConfiguration.h11) {
 				return BootstrapHandlers.updateConfiguration(b,
@@ -192,7 +210,9 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.initialBufferSize,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 			if ((conf.protocols & HttpServerConfiguration.h2c) == HttpServerConfiguration.h2c) {
 				return BootstrapHandlers.updateConfiguration(b,
@@ -201,7 +221,9 @@ final class HttpServerBind extends HttpServer
 								conf.decoder.validateHeaders,
 								conf.minCompressionSize,
 								compressPredicate(conf.compressPredicate, conf.minCompressionSize),
-								conf.forwarded));
+								conf.forwarded,
+								conf.cookieEncoder,
+								conf.cookieDecoder));
 			}
 		}
 		throw new IllegalArgumentException("An unknown HttpServer#protocol " +
@@ -245,9 +267,14 @@ final class HttpServerBind extends HttpServer
 		return lengthPredicate;
 	}
 
-	static void addStreamHandlers(Channel ch, ConnectionObserver listener, boolean readForwardHeaders) {
+	static void addStreamHandlers(Channel ch, ConnectionObserver listener, boolean readForwardHeaders,
+			ServerCookieEncoder encoder, ServerCookieDecoder decoder) {
+		if (ACCESS_LOG) {
+			ch.pipeline()
+			  .addLast(NettyPipeline.AccessLogHandler, new AccessLogHandlerH2());
+		}
 		ch.pipeline()
-		  .addLast(new Http2StreamBridgeHandler(listener, readForwardHeaders))
+		  .addLast(new Http2StreamBridgeHandler(listener, readForwardHeaders, encoder, decoder))
 		  .addLast(new Http2StreamFrameToHttpObjectCodec(true));
 
 		ChannelOperations.addReactiveBridge(ch, ChannelOperations.OnSetup.empty(), listener);
@@ -257,6 +284,28 @@ final class HttpServerBind extends HttpServer
 		}
 	}
 
+
+	static final class DisposableBind implements DisposableServer {
+
+		final DisposableServer server;
+
+		DisposableBind(DisposableServer server) {
+			this.server = server;
+		}
+
+		@Override
+		public void dispose() {
+			server.dispose();
+
+			HttpResources.get()
+			             .disposeWhen(server.address());
+		}
+
+		@Override
+		public Channel channel() {
+			return server.channel();
+		}
+	}
 
 	static final class Http1Initializer
 			implements BiConsumer<ConnectionObserver, Channel>  {
@@ -269,6 +318,8 @@ final class HttpServerBind extends HttpServer
 		final int                                                minCompressionSize;
 		final BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate;
 		final boolean                                            forwarded;
+		final ServerCookieEncoder                                cookieEncoder;
+		final ServerCookieDecoder                                cookieDecoder;
 
 		Http1Initializer(int line,
 				int header,
@@ -277,7 +328,9 @@ final class HttpServerBind extends HttpServer
 				int buffer,
 				int minCompressionSize,
 				@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate,
-				boolean forwarded) {
+				boolean forwarded,
+				ServerCookieEncoder encoder,
+				ServerCookieDecoder decoder) {
 			this.line = line;
 			this.header = header;
 			this.chunk = chunk;
@@ -286,6 +339,8 @@ final class HttpServerBind extends HttpServer
 			this.minCompressionSize = minCompressionSize;
 			this.compressPredicate = compressPredicate;
 			this.forwarded = forwarded;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
@@ -293,6 +348,10 @@ final class HttpServerBind extends HttpServer
 			ChannelPipeline p = channel.pipeline();
 
 			p.addLast(NettyPipeline.HttpCodec, new HttpServerCodec(line, header, chunk, validate, buffer));
+
+			if (ACCESS_LOG) {
+				p.addLast(NettyPipeline.AccessLogHandler, new AccessLogHandler());
+			}
 
 			boolean alwaysCompress = compressPredicate == null && minCompressionSize == 0;
 
@@ -302,7 +361,7 @@ final class HttpServerBind extends HttpServer
 			}
 
 			p.addLast(NettyPipeline.HttpTrafficHandler,
-					new HttpTrafficHandler(listener, forwarded, compressPredicate));
+					new HttpTrafficHandler(listener, forwarded, compressPredicate, cookieEncoder, cookieDecoder));
 		}
 	}
 
@@ -317,6 +376,8 @@ final class HttpServerBind extends HttpServer
 		final int                                                minCompressionSize;
 		final BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate;
 		final boolean                                            forwarded;
+		final ServerCookieEncoder                                cookieEncoder;
+		final ServerCookieDecoder                                cookieDecoder;
 
 		Http1OrH2CleartextInitializer(int line,
 				int header,
@@ -325,7 +386,9 @@ final class HttpServerBind extends HttpServer
 				int buffer,
 				int minCompressionSize,
 				@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate,
-				boolean forwarded) {
+				boolean forwarded,
+				ServerCookieEncoder encoder,
+				ServerCookieDecoder decoder) {
 			this.line = line;
 			this.header = header;
 			this.chunk = chunk;
@@ -334,6 +397,8 @@ final class HttpServerBind extends HttpServer
 			this.minCompressionSize = minCompressionSize;
 			this.compressPredicate = compressPredicate;
 			this.forwarded = forwarded;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
@@ -358,6 +423,10 @@ final class HttpServerBind extends HttpServer
 
 			p.addLast(NettyPipeline.HttpCodec, h2cUpgradeHandler);
 
+			if (ACCESS_LOG) {
+				p.addLast(NettyPipeline.AccessLogHandler, new AccessLogHandler());
+			}
+
 			boolean alwaysCompress = compressPredicate == null && minCompressionSize == 0;
 
 			if (alwaysCompress) {
@@ -366,7 +435,7 @@ final class HttpServerBind extends HttpServer
 			}
 
 			p.addLast(NettyPipeline.HttpTrafficHandler,
-					new HttpTrafficHandler(listener, forwarded, compressPredicate));
+					new HttpTrafficHandler(listener, forwarded, compressPredicate, cookieEncoder, cookieDecoder));
 		}
 	}
 
@@ -403,7 +472,7 @@ final class HttpServerBind extends HttpServer
 		 */
 		@Override
 		protected void initChannel(Channel ch) {
-			addStreamHandlers(ch, listener, parent.forwarded);
+			addStreamHandlers(ch, listener, parent.forwarded, parent.cookieEncoder, parent.cookieDecoder);
 		}
 
 		@Override
@@ -426,16 +495,22 @@ final class HttpServerBind extends HttpServer
 		final int                                                minCompressionSize;
 		final BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate;
 		final boolean                                            forwarded;
+		final ServerCookieEncoder                                cookieEncoder;
+		final ServerCookieDecoder                                cookieDecoder;
 
 		H2CleartextInitializer(
 				boolean validate,
 				int minCompressionSize,
 				@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate,
-				boolean forwarded) {
+				boolean forwarded,
+				ServerCookieEncoder encoder,
+				ServerCookieDecoder decoder) {
 			this.validate = validate;
 			this.minCompressionSize = minCompressionSize;
 			this.compressPredicate = compressPredicate;
 			this.forwarded = forwarded;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
@@ -443,7 +518,7 @@ final class HttpServerBind extends HttpServer
 			ChannelPipeline p = channel.pipeline();
 
 			Http2MultiplexCodecBuilder http2MultiplexCodecBuilder =
-					Http2MultiplexCodecBuilder.forServer(new Http2StreamInitializer(listener, forwarded))
+					Http2MultiplexCodecBuilder.forServer(new Http2StreamInitializer(listener, forwarded, cookieEncoder, cookieDecoder))
 					                          .validateHeaders(validate)
 					                          .initialSettings(Http2Settings.defaultSettings());
 
@@ -472,6 +547,8 @@ final class HttpServerBind extends HttpServer
 		final int                                                minCompressionSize;
 		final BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate;
 		final boolean                                            forwarded;
+		final ServerCookieEncoder                                cookieEncoder;
+		final ServerCookieDecoder                                cookieDecoder;
 
 		Http1OrH2Initializer(
 				int line,
@@ -481,7 +558,9 @@ final class HttpServerBind extends HttpServer
 				int buffer,
 				int minCompressionSize,
 				@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate,
-				boolean forwarded) {
+				boolean forwarded,
+				ServerCookieEncoder encoder,
+				ServerCookieDecoder decoder) {
 			this.line = line;
 			this.header = header;
 			this.chunk = chunk;
@@ -490,6 +569,8 @@ final class HttpServerBind extends HttpServer
 			this.minCompressionSize = minCompressionSize;
 			this.compressPredicate = compressPredicate;
 			this.forwarded = forwarded;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
@@ -519,7 +600,9 @@ final class HttpServerBind extends HttpServer
 				p.remove(NettyPipeline.ReactiveBridge);
 
 				Http2MultiplexCodecBuilder http2MultiplexCodecBuilder =
-						Http2MultiplexCodecBuilder.forServer(new Http2StreamInitializer(listener, parent.forwarded))
+						Http2MultiplexCodecBuilder.forServer(new Http2StreamInitializer(listener, parent.forwarded,
+						                                                                parent.cookieEncoder,
+						                                                                parent.cookieDecoder))
 						                          .initialSettings(Http2Settings.defaultSettings());
 
 				if (p.get(NettyPipeline.LoggingHandler) != null) {
@@ -538,7 +621,12 @@ final class HttpServerBind extends HttpServer
 						new HttpServerCodec(parent.line, parent.header, parent.chunk, parent.validate, parent.buffer))
 				 .addBefore(NettyPipeline.ReactiveBridge,
 						 NettyPipeline.HttpTrafficHandler,
-						 new HttpTrafficHandler( listener, parent.forwarded, parent.compressPredicate));
+						 new HttpTrafficHandler(listener, parent.forwarded, parent.compressPredicate, parent.cookieEncoder, parent.cookieDecoder));
+
+				if (ACCESS_LOG) {
+					p.addAfter(NettyPipeline.HttpCodec,
+							NettyPipeline.AccessLogHandler, new AccessLogHandler());
+				}
 
 				boolean alwaysCompress = parent.compressPredicate == null && parent.minCompressionSize == 0;
 
@@ -561,16 +649,22 @@ final class HttpServerBind extends HttpServer
 		final int                                                minCompressionSize;
 		final BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate;
 		final boolean                                            forwarded;
+		final ServerCookieEncoder                                cookieEncoder;
+		final ServerCookieDecoder                                cookieDecoder;
 
 		H2Initializer(
 				boolean validate,
 				int minCompressionSize,
 				@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compressPredicate,
-				boolean forwarded) {
+				boolean forwarded,
+				ServerCookieEncoder encoder,
+				ServerCookieDecoder decoder) {
 			this.validate = validate;
 			this.minCompressionSize = minCompressionSize;
 			this.compressPredicate = compressPredicate;
 			this.forwarded = forwarded;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
@@ -579,7 +673,7 @@ final class HttpServerBind extends HttpServer
 
 			Http2MultiplexCodecBuilder http2MultiplexCodecBuilder =
 					Http2MultiplexCodecBuilder.forServer(new Http2StreamInitializer
-							(listener, forwarded))
+							(listener, forwarded, cookieEncoder, cookieDecoder))
 					                          .validateHeaders(validate)
 					                          .initialSettings(Http2Settings.defaultSettings());
 
@@ -593,17 +687,21 @@ final class HttpServerBind extends HttpServer
 
 	static final class Http2StreamInitializer extends ChannelInitializer<Channel> {
 
-		final boolean            forwarded;
-		final ConnectionObserver listener;
+		final boolean             forwarded;
+		final ConnectionObserver  listener;
+		final ServerCookieEncoder cookieEncoder;
+		final ServerCookieDecoder cookieDecoder;
 
-		Http2StreamInitializer(ConnectionObserver listener, boolean forwarded) {
+		Http2StreamInitializer(ConnectionObserver listener, boolean forwarded, ServerCookieEncoder encoder, ServerCookieDecoder decoder) {
 			this.forwarded = forwarded;
 			this.listener = listener;
+			this.cookieEncoder = encoder;
+			this.cookieDecoder = decoder;
 		}
 
 		@Override
 		protected void initChannel(Channel ch) {
-			addStreamHandlers(ch, listener, forwarded);
+			addStreamHandlers(ch, listener, forwarded, cookieEncoder, cookieDecoder);
 		}
 	}
 

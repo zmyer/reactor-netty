@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,7 +51,8 @@ final class HttpClientDoOn extends HttpClientOperator implements ConnectionObser
 
 	@Override
 	public Bootstrap apply(Bootstrap bootstrap) {
-		BootstrapHandlers.connectionObserver(bootstrap, this);
+		ConnectionObserver observer = BootstrapHandlers.connectionObserver(bootstrap);
+		BootstrapHandlers.connectionObserver(bootstrap, observer.then(this));
 		return bootstrap;
 	}
 
@@ -70,11 +71,11 @@ final class HttpClientDoOn extends HttpClientOperator implements ConnectionObser
 			}
 			return;
 		}
-		if (afterRequest != null && newState == HttpClientOperations.REQUEST_SENT) {
+		if (afterRequest != null && newState == HttpClientState.REQUEST_SENT) {
 			afterRequest.accept(connection.as(HttpClientOperations.class), connection);
 			return;
 		}
-		if (onResponse != null && newState == HttpClientOperations.RESPONSE_RECEIVED) {
+		if (onResponse != null && newState == HttpClientState.RESPONSE_RECEIVED) {
 			onResponse.accept(connection.as(HttpClientOperations.class), connection);
 		}
 	}

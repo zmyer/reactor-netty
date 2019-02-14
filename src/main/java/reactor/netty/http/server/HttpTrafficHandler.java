@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,8 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.util.ReferenceCountUtil;
 import reactor.core.Exceptions;
 import reactor.netty.Connection;
@@ -43,7 +45,7 @@ import reactor.netty.ConnectionObserver;
 import reactor.util.concurrent.Queues;
 
 import static io.netty.handler.codec.http.HttpUtil.*;
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * Replace {@link io.netty.handler.codec.http.HttpServerKeepAliveHandler} with extra
@@ -57,6 +59,8 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 	final ConnectionObserver listener;
 	final boolean            readForwardHeaders;
 	final BiPredicate<HttpServerRequest, HttpServerResponse> compress;
+	final ServerCookieEncoder cookieEncoder;
+	final ServerCookieDecoder cookieDecoder;
 
 	boolean persistentConnection = true;
 	// Track pending responses to support client pipelining: https://tools.ietf.org/html/rfc7230#section-6.3.2
@@ -67,13 +71,17 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 	ChannelHandlerContext ctx;
 
 	boolean overflow;
-	boolean mustRecycleEncoder;
+	boolean nonInformationalResponse;
 
 	HttpTrafficHandler(ConnectionObserver listener, boolean readForwardHeaders,
-			@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compress) {
+			@Nullable BiPredicate<HttpServerRequest, HttpServerResponse> compress,
+			ServerCookieEncoder encoder,
+			ServerCookieDecoder decoder) {
 		this.listener = listener;
 		this.readForwardHeaders = readForwardHeaders;
 		this.compress = compress;
+		this.cookieEncoder = encoder;
+		this.cookieDecoder = decoder;
 	}
 
 	@Override
@@ -95,8 +103,11 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 			DecoderResult decoderResult = request.decoderResult();
 			if (decoderResult.isFailure()) {
 				Throwable cause = decoderResult.cause();
-				HttpServerOperations.log.debug(format(ctx.channel(), "Decoding failed: " + msg + " : "),
-						cause);
+				if (HttpServerOperations.log.isDebugEnabled()) {
+					HttpServerOperations.log.debug(format(ctx.channel(), "Decoding failed: " + msg + " : "),
+							cause);
+				}
+				ReferenceCountUtil.release(msg);
 
 				HttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_0,
 				        cause instanceof TooLongFrameException ? HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE:
@@ -139,12 +150,14 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 			else {
 				overflow = false;
 
-				new HttpServerOperations(Connection.from(ctx.channel()),
+				HttpServerOperations ops = new HttpServerOperations(Connection.from(ctx.channel()),
 						listener,
 						compress,
-						request, ConnectionInfo.from(ctx.channel(), readForwardHeaders, request))
-						.chunkedTransfer(true)
-						.bind();
+						request, ConnectionInfo.from(ctx.channel(), readForwardHeaders, request),
+						cookieEncoder, cookieDecoder)
+						.chunkedTransfer(true);
+				ops.bind();
+				listener.onStateChange(ops, ConnectionObserver.State.CONFIGURED);
 
 				ctx.fireChannelRead(msg);
 				return;
@@ -152,14 +165,14 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 			}
 		}
 		else if (persistentConnection && pendingResponses == 0) {
-			if (HttpServerOperations.log.isDebugEnabled()) {
-				HttpServerOperations.log.debug(format(ctx.channel(), "Dropped HTTP content, " +
-						"since response has been sent already: {}"), msg);
-			}
 			if (msg instanceof LastHttpContent) {
 				ctx.fireChannelRead(msg);
 			}
 			else {
+				if (HttpServerOperations.log.isDebugEnabled()) {
+					HttpServerOperations.log.debug(format(ctx.channel(), "Dropped HTTP content, " +
+							"since response has been sent already: {}"), msg);
+				}
 				ReferenceCountUtil.release(msg);
 			}
 			ctx.read();
@@ -193,7 +206,7 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 		// modify message on way out to add headers if needed
 		if (msg instanceof HttpResponse) {
 			final HttpResponse response = (HttpResponse) msg;
-			trackResponse(response);
+			nonInformationalResponse = !isInformational(response);
 			// Assume the response writer knows if they can persist or not and sets isKeepAlive on the response
 			if (!isKeepAlive(response) || !isSelfDefinedMessageLength(response)) {
 				// No longer keep alive as the client can't tell when the message is done unless we close connection
@@ -217,8 +230,9 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 									"connection, preparing to close"),
 							pendingResponses);
 				}
-				promise.addListener(ChannelFutureListener.CLOSE);
-				ctx.write(msg, promise);
+				ctx.write(msg, promise)
+				   .addListener(this)
+				   .addListener(ChannelFutureListener.CLOSE);
 				return;
 			}
 
@@ -229,8 +243,8 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 				return;
 			}
 
-			if (mustRecycleEncoder) {
-				mustRecycleEncoder = false;
+			if (nonInformationalResponse) {
+				nonInformationalResponse = false;
 				pendingResponses -= 1;
 				if (HttpServerOperations.log.isDebugEnabled()) {
 					HttpServerOperations.log.debug(format(ctx.channel(), "Decreasing pending responses, now {}"),
@@ -255,10 +269,6 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 		ctx.write(msg, promise);
 	}
 
-	void trackResponse(HttpResponse response) {
-		mustRecycleEncoder = !isInformational(response);
-	}
-
 	@Override
 	public void run() {
 		Object next;
@@ -273,12 +283,14 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 					return;
 				}
 				nextRequest = (HttpRequest)next;
-				new HttpServerOperations(Connection.from(ctx.channel()),
+				HttpServerOperations ops = new HttpServerOperations(Connection.from(ctx.channel()),
 						listener,
 						compress,
-						nextRequest, ConnectionInfo.from(ctx.channel(), readForwardHeaders, nextRequest))
-						.chunkedTransfer(true)
-						.bind();
+						nextRequest, ConnectionInfo.from(ctx.channel(), readForwardHeaders, nextRequest),
+						cookieEncoder, cookieDecoder)
+						.chunkedTransfer(true);
+				ops.bind();
+				listener.onStateChange(ops, ConnectionObserver.State.CONFIGURED);
 			}
 			ctx.fireChannelRead(pipelined.poll());
 		}
@@ -287,6 +299,10 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 
 	@Override
 	public void operationComplete(ChannelFuture future) {
+		if (HttpServerOperations.log.isDebugEnabled()) {
+			HttpServerOperations.log.debug(format(future.channel(),
+					"Last Http packet was sent, terminating channel"));
+		}
 		HttpServerOperations.cleanHandlerTerminate(future.channel());
 	}
 
@@ -322,12 +338,16 @@ final class HttpTrafficHandler extends ChannelDuplexHandler
 	 */
 	static boolean isSelfDefinedMessageLength(HttpResponse response) {
 		return isContentLengthSet(response) || isTransferEncodingChunked(response) || isMultipart(
-				response) || isInformational(response);
+				response) || isInformational(response) || isNotModified(response);
 	}
 
 	static boolean isInformational(HttpResponse response) {
 		return response.status()
 		               .codeClass() == HttpStatusClass.INFORMATIONAL;
+	}
+
+	static boolean isNotModified(HttpResponse response) {
+		return HttpResponseStatus.NOT_MODIFIED.equals(response.status());
 	}
 
 	static boolean isMultipart(HttpResponse response) {

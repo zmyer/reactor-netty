@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ import reactor.util.Loggers;
 import reactor.util.concurrent.Queues;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -87,12 +87,6 @@ final class FluxReceive extends Flux<Object> implements Subscription, Disposable
 
 	final boolean isCancelled() {
 		return receiverCancel == CANCELLED;
-	}
-
-	final void discard() {
-		inboundDone = true;
-		receiverCancel = CANCELLED;
-		drainReceiver();
 	}
 
 	@Override
@@ -293,12 +287,12 @@ final class FluxReceive extends Flux<Object> implements Subscription, Disposable
 			try {
 				if (log.isDebugEnabled()){
 					if(msg instanceof ByteBuf) {
-						((ByteBuf) msg).touch("Unbounded receiver, bypass inbound " +
-								"buffer queue");
+						((ByteBuf) msg).touch(format(channel, "Unbounded receiver, bypass inbound " +
+								"buffer queue"));
 					}
 					else if (msg instanceof ByteBufHolder){
-						((ByteBufHolder) msg).touch("Unbounded receiver, bypass inbound " +
-								"buffer queue");
+						((ByteBufHolder) msg).touch(format(channel,"Unbounded receiver, bypass inbound " +
+								"buffer queue"));
 					}
 				}
 				receiver.onNext(msg);
@@ -316,11 +310,11 @@ final class FluxReceive extends Flux<Object> implements Subscription, Disposable
 			}
 			if (log.isDebugEnabled()){
 				if(msg instanceof ByteBuf) {
-					((ByteBuf) msg).touch("Buffered ByteBuf in Inbound Flux Queue");
+					((ByteBuf) msg).touch(format(channel,"Buffered ByteBuf in Inbound Flux Queue"));
 				}
 				else if (msg instanceof ByteBufHolder){
-					((ByteBufHolder) msg).touch("Buffered ByteBufHolder in Inbound Flux" +
-							" Queue");
+					((ByteBufHolder) msg).touch(format(channel,"Buffered ByteBufHolder in Inbound Flux" +
+							" Queue"));
 				}
 			}
 			q.offer(msg);
@@ -354,7 +348,7 @@ final class FluxReceive extends Flux<Object> implements Subscription, Disposable
 		this.inboundDone = true;
 
 		if(channel.isActive()){
-			channel.close();
+			parent.markPersistent(false);
 		}
 		if (receiverFastpath && receiver != null) {
 			//parent.listener.onReceiveError(channel, err);
@@ -385,6 +379,13 @@ final class FluxReceive extends Flux<Object> implements Subscription, Disposable
 		if(isCancelled()) {
 			parent.onInboundCancel();
 		}
+	}
+
+	@Override
+	public String toString() {
+		return "FluxReceive{receiverQueueSize" +
+				"=" + (receiverQueue != null ? receiverQueue.size() : 0) + ", inboundDone=" + inboundDone
+				+ ",inboundError=" + inboundError + '}';
 	}
 
 	@SuppressWarnings("rawtypes")

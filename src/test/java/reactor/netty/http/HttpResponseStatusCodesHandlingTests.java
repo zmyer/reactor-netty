@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,13 +37,13 @@ public class HttpResponseStatusCodesHandlingTests {
 				          .port(0)
 				          .route(r -> r.post("/test", (req, res) -> res.send(req.receive()
 				                                                                .log("server-received"))))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		HttpClient client =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		Mono<Integer> content = client.headers(h -> h.add("Content-Type", "text/plain"))
 				                      .request(HttpMethod.GET)
@@ -57,6 +57,6 @@ public class HttpResponseStatusCodesHandlingTests {
 				    .expectNext(404)
 				    .verifyComplete();
 
-		server.dispose();
+		server.disposeNow();
 	}
 }

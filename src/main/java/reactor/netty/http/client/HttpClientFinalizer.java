@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ final class HttpClientFinalizer extends HttpClient implements HttpClient.Request
 
 	@Override
 	public HttpClient.RequestSender uri(Mono<String> uri) {
-		return new HttpClientFinalizer(cachedConfiguration.bootstrap(b -> HttpClientConfiguration.deferredUri(b, uri)));
+		return new HttpClientFinalizer(cachedConfiguration.bootstrap(b -> HttpClientConfiguration.deferredConf(b, conf -> uri.map(conf::uri))));
 	}
 
 	// ResponseReceiver methods
@@ -77,32 +77,12 @@ final class HttpClientFinalizer extends HttpClient implements HttpClient.Request
 	@Override
 	public <V> Flux<V> response(BiFunction<? super HttpClientResponse, ? super ByteBufFlux, ? extends Publisher<V>> receiver) {
 		return connect().flatMapMany(resp -> Flux.from(receiver.apply(resp, resp.receive()))
-		                                          .doFinally(s -> dispose(resp)));
+		                                          .doFinally(s -> discard(resp)));
 	}
 
 	@Override
 	public <V> Flux<V> responseConnection(BiFunction<? super HttpClientResponse, ? super Connection, ? extends Publisher<V>> receiver) {
 		return connect().flatMapMany(resp -> Flux.from(receiver.apply(resp, resp)));
-	}
-
-	static ByteBufFlux content(TcpClient cachedConfiguration, Function<ChannelOperations<?, ?>, Publisher<ByteBuf>> contentReceiver) {
-		Bootstrap b;
-		try {
-			b = cachedConfiguration.configure();
-		}
-		catch (Throwable t) {
-			Exceptions.throwIfFatal(t);
-			return ByteBufFlux.fromInbound(Mono.error(t));
-		}
-		@SuppressWarnings("unchecked")
-		ByteBufAllocator alloc = (ByteBufAllocator) b.config()
-		                                             .options()
-		                                             .getOrDefault(ChannelOption.ALLOCATOR, ByteBufAllocator.DEFAULT);
-
-		@SuppressWarnings("unchecked")
-		Mono<ChannelOperations<?, ?>> connector = (Mono<ChannelOperations<?, ?>>) cachedConfiguration.connect(b);
-
-		return ByteBufFlux.fromInbound(connector.flatMapMany(contentReceiver), alloc);
 	}
 
 	@Override
@@ -114,14 +94,9 @@ final class HttpClientFinalizer extends HttpClient implements HttpClient.Request
 	public <V> Mono<V> responseSingle(BiFunction<? super HttpClientResponse, ? super ByteBufMono, ? extends Mono<V>> receiver) {
 		return connect().flatMap(resp -> receiver.apply(resp,
 				resp.receive()
-				    .aggregate()).doFinally(s -> dispose(resp)));
+				    .aggregate()).doFinally(s -> discard(resp)));
 	}
 
-	static void dispose(HttpClientOperations c) {
-		if (!c.isDisposed() && !c.isInboundDisposed()) {
-			c.channel().eventLoop().execute(c::dispose);
-		}
-	}
 
 
 	// RequestSender methods
@@ -148,12 +123,37 @@ final class HttpClientFinalizer extends HttpClient implements HttpClient.Request
 		});
 	}
 
+	static ByteBufFlux content(TcpClient cachedConfiguration, Function<ChannelOperations<?, ?>, Publisher<ByteBuf>> contentReceiver) {
+		Bootstrap b;
+		try {
+			b = cachedConfiguration.configure();
+		}
+		catch (Throwable t) {
+			Exceptions.throwIfJvmFatal(t);
+			return ByteBufFlux.fromInbound(Mono.error(t));
+		}
+		@SuppressWarnings("unchecked")
+		ByteBufAllocator alloc = (ByteBufAllocator) b.config()
+		                                             .options()
+		                                             .getOrDefault(ChannelOption.ALLOCATOR, ByteBufAllocator.DEFAULT);
+
+		@SuppressWarnings("unchecked")
+		Mono<ChannelOperations<?, ?>> connector = (Mono<ChannelOperations<?, ?>>) cachedConfiguration.connect(b);
+
+		return ByteBufFlux.fromInbound(connector.flatMapMany(contentReceiver), alloc);
+	}
 
 	static final Function<HttpClientOperations, HttpClientResponse> RESPONSE_ONLY = ops -> {
 		//defer the dispose to avoid over disposing on receive
-		dispose(ops);
+		discard(ops);
 		return ops;
 	};
+
+	static void discard(HttpClientOperations c) {
+		if (!c.isInboundDisposed()) {
+			c.discard();
+		}
+	}
 
 	static final Function<ChannelOperations<?, ?>, Publisher<ByteBuf>> contentReceiver = ChannelOperations::receive;
 }

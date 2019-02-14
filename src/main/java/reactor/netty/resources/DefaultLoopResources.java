@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,9 +39,9 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 	final boolean                         daemon;
 	final int                             selectCount;
 	final int                             workerCount;
-	final EventLoopGroup                  serverLoops;
-	final EventLoopGroup                  clientLoops;
-	final EventLoopGroup                  serverSelectLoops;
+	final AtomicReference<EventLoopGroup> serverLoops;
+	final AtomicReference<EventLoopGroup> clientLoops;
+	final AtomicReference<EventLoopGroup> serverSelectLoops;
 	final AtomicReference<EventLoopGroup> cacheNativeClientLoops;
 	final AtomicReference<EventLoopGroup> cacheNativeServerLoops;
 	final AtomicReference<EventLoopGroup> cacheNativeSelectLoops;
@@ -66,10 +66,8 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 		this.workerCount = workerCount;
 		this.prefix = prefix;
 
-		this.serverLoops = new NioEventLoopGroup(workerCount,
-				threadFactory(this, "nio"));
-
-		this.clientLoops = LoopResources.colocate(serverLoops);
+		this.serverLoops = new AtomicReference<>();
+		this.clientLoops = new AtomicReference<>();
 
 		this.cacheNativeClientLoops = new AtomicReference<>();
 		this.cacheNativeServerLoops = new AtomicReference<>();
@@ -81,8 +79,7 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 		}
 		else {
 			this.selectCount = selectCount;
-			this.serverSelectLoops =
-					new NioEventLoopGroup(selectCount, threadFactory(this, "select-nio"));
+			this.serverSelectLoops = new AtomicReference<>();
 			this.cacheNativeSelectLoops = new AtomicReference<>();
 		}
 	}
@@ -96,39 +93,38 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 	@SuppressWarnings("unchecked")
 	public Mono<Void> disposeLater() {
 		return Mono.defer(() -> {
+			EventLoopGroup serverLoopsGroup = serverLoops.get();
+			EventLoopGroup clientLoopsGroup = clientLoops.get();
+			EventLoopGroup serverSelectLoopsGroup = serverSelectLoops.get();
 			EventLoopGroup cacheNativeClientGroup = cacheNativeClientLoops.get();
 			EventLoopGroup cacheNativeSelectGroup = cacheNativeSelectLoops.get();
 			EventLoopGroup cacheNativeServerGroup = cacheNativeServerLoops.get();
 
+			Mono<?> clMono = Mono.empty();
+			Mono<?> sslMono = Mono.empty();
+			Mono<?> slMono = Mono.empty();
+			Mono<?> cnclMono = Mono.empty();
+			Mono<?> cnslMono = Mono.empty();
+			Mono<?> cnsrvlMono = Mono.empty();
 			if(running.compareAndSet(true, false)) {
-				clientLoops.shutdownGracefully();
-				serverSelectLoops.shutdownGracefully();
-				serverLoops.shutdownGracefully();
+				if (clientLoopsGroup != null) {
+					clMono = FutureMono.from((Future) clientLoopsGroup.shutdownGracefully());
+				}
+				if (serverSelectLoopsGroup != null) {
+					sslMono = FutureMono.from((Future) serverSelectLoopsGroup.shutdownGracefully());
+				}
+				if (serverLoopsGroup != null) {
+					slMono = FutureMono.from((Future) serverLoopsGroup.shutdownGracefully());
+				}
 				if(cacheNativeClientGroup != null){
-					cacheNativeClientGroup.shutdownGracefully();
+					cnclMono = FutureMono.from((Future) cacheNativeClientGroup.shutdownGracefully());
 				}
 				if(cacheNativeSelectGroup != null){
-					cacheNativeSelectGroup.shutdownGracefully();
+					cnslMono = FutureMono.from((Future) cacheNativeSelectGroup.shutdownGracefully());
 				}
 				if(cacheNativeServerGroup != null){
-					cacheNativeServerGroup.shutdownGracefully();
+					cnsrvlMono = FutureMono.from((Future) cacheNativeServerGroup.shutdownGracefully());
 				}
-			}
-
-			Mono<?> clMono = FutureMono.from((Future) clientLoops.terminationFuture());
-			Mono<?> sslMono = FutureMono.from((Future)serverSelectLoops.terminationFuture());
-			Mono<?> slMono = FutureMono.from((Future)serverLoops.terminationFuture());
-			Mono<?> cnclMono = Mono.empty();
-			if(cacheNativeClientGroup != null){
-				cnclMono = FutureMono.from((Future) cacheNativeClientGroup.terminationFuture());
-			}
-			Mono<?> cnslMono = Mono.empty();
-			if(cacheNativeSelectGroup != null){
-				cnslMono = FutureMono.from((Future) cacheNativeSelectGroup.terminationFuture());
-			}
-			Mono<?> cnsrvlMono = Mono.empty();
-			if(cacheNativeServerGroup != null){
-				cnsrvlMono = FutureMono.from((Future) cacheNativeServerGroup.terminationFuture());
 			}
 
 			return Mono.when(clMono, sslMono, slMono, cnclMono, cnslMono, cnsrvlMono);
@@ -140,7 +136,24 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 		if (useNative && preferNative()) {
 			return cacheNativeSelectLoops();
 		}
-		return serverSelectLoops;
+		return cacheNioSelectLoops();
+	}
+
+	EventLoopGroup cacheNioSelectLoops() {
+		if (serverSelectLoops == serverLoops) {
+			return cacheNioServerLoops();
+		}
+
+		EventLoopGroup eventLoopGroup = serverSelectLoops.get();
+		if (null == eventLoopGroup) {
+			EventLoopGroup newEventLoopGroup = new NioEventLoopGroup(selectCount,
+					threadFactory(this, "select-nio"));
+			if (!serverSelectLoops.compareAndSet(null, newEventLoopGroup)) {
+				newEventLoopGroup.shutdownGracefully();
+			}
+			eventLoopGroup = cacheNioSelectLoops();
+		}
+		return eventLoopGroup;
 	}
 
 	@Override
@@ -148,7 +161,20 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 		if (useNative && preferNative()) {
 			return cacheNativeServerLoops();
 		}
-		return serverLoops;
+		return cacheNioServerLoops();
+	}
+
+	EventLoopGroup cacheNioServerLoops() {
+		EventLoopGroup eventLoopGroup = serverLoops.get();
+		if (null == eventLoopGroup) {
+			EventLoopGroup newEventLoopGroup = new NioEventLoopGroup(workerCount,
+					threadFactory(this, "nio"));
+			if (!serverLoops.compareAndSet(null, newEventLoopGroup)) {
+				newEventLoopGroup.shutdownGracefully();
+			}
+			eventLoopGroup = cacheNioServerLoops();
+		}
+		return eventLoopGroup;
 	}
 
 	@Override
@@ -156,7 +182,29 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 		if (useNative && preferNative()) {
 			return cacheNativeClientLoops();
 		}
-		return clientLoops;
+		return cacheNioClientLoops();
+	}
+
+	EventLoopGroup cacheNioClientLoops() {
+		EventLoopGroup eventLoopGroup = clientLoops.get();
+		if (null == eventLoopGroup) {
+			EventLoopGroup newEventLoopGroup = LoopResources.colocate(cacheNioServerLoops());
+			if (!clientLoops.compareAndSet(null, newEventLoopGroup)) {
+				// Do not shutdown newEventLoopGroup as this will shutdown the server loops
+			}
+			eventLoopGroup = cacheNioClientLoops();
+		}
+		return eventLoopGroup;
+	}
+
+	@Override
+	public String toString() {
+		return "DefaultLoopResources {" +
+				"prefix=" + prefix +
+				", daemon=" + daemon +
+				", selectCount=" + selectCount +
+				", workerCount=" + workerCount +
+				'}';
 	}
 
 	EventLoopGroup cacheNativeSelectLoops() {
@@ -184,7 +232,7 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 			DefaultLoop defaultLoop = DefaultLoopNativeDetector.getInstance();
 			EventLoopGroup newEventLoopGroup = defaultLoop.newEventLoopGroup(
 					workerCount,
-					threadFactory(this, "server-" + defaultLoop.getName()));
+					threadFactory(this, defaultLoop.getName()));
 			if (!cacheNativeServerLoops.compareAndSet(null, newEventLoopGroup)) {
 				newEventLoopGroup.shutdownGracefully();
 			}
@@ -196,13 +244,9 @@ final class DefaultLoopResources extends AtomicLong implements LoopResources {
 	EventLoopGroup cacheNativeClientLoops() {
 		EventLoopGroup eventLoopGroup = cacheNativeClientLoops.get();
 		if (null == eventLoopGroup) {
-			DefaultLoop defaultLoop = DefaultLoopNativeDetector.getInstance();
-			EventLoopGroup newEventLoopGroup = defaultLoop.newEventLoopGroup(
-					workerCount,
-					threadFactory(this, "client-" + defaultLoop.getName()));
-			newEventLoopGroup = LoopResources.colocate(newEventLoopGroup);
+			EventLoopGroup newEventLoopGroup = LoopResources.colocate(cacheNativeServerLoops());
 			if (!cacheNativeClientLoops.compareAndSet(null, newEventLoopGroup)) {
-				newEventLoopGroup.shutdownGracefully();
+				// Do not shutdown newEventLoopGroup as this will shutdown the server loops
 			}
 			eventLoopGroup = cacheNativeClientLoops();
 		}

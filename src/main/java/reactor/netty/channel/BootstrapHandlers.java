@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,15 +31,16 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelPipeline;
 import io.netty.handler.logging.LoggingHandler;
 import reactor.core.Exceptions;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.NettyPipeline;
-import reactor.netty.SystemPropertiesNames;
+import reactor.netty.ReactorNetty;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * Helper to update configuration the main {@link Bootstrap} and
@@ -54,7 +55,7 @@ public abstract class BootstrapHandlers {
 	 * fallback to SSL debugging disabled
 	 */
 	static final boolean SSL_CLIENT_DEBUG =
-			Boolean.parseBoolean(System.getProperty(SystemPropertiesNames.SSL_CLIENT_DEBUG,
+			Boolean.parseBoolean(System.getProperty(ReactorNetty.SSL_CLIENT_DEBUG,
 			                                        "false"));
 
 	/**
@@ -62,7 +63,7 @@ public abstract class BootstrapHandlers {
 	 * fallback to SSL debugging disabled
 	 */
 	static final boolean SSL_SERVER_DEBUG =
-			Boolean.parseBoolean(System.getProperty(SystemPropertiesNames.SSL_SERVER_DEBUG,
+			Boolean.parseBoolean(System.getProperty(ReactorNetty.SSL_SERVER_DEBUG,
 			                                        "false"));
 
 	/**
@@ -162,10 +163,11 @@ public abstract class BootstrapHandlers {
 	 * @param b a server bootstrap
 	 * @param name a configuration name
 	 */
-	public static void removeConfiguration(ServerBootstrap b, String name) {
+	public static ServerBootstrap removeConfiguration(ServerBootstrap b, String name) {
 		Objects.requireNonNull(b, "bootstrap");
 		Objects.requireNonNull(name, "name");
 		b.childHandler(removeConfiguration(b.config().childHandler(), name));
+		return b;
 	}
 
 	/**
@@ -175,13 +177,13 @@ public abstract class BootstrapHandlers {
 	 * @param b a bootstrap
 	 * @param name a configuration name
 	 */
-	public static void removeConfiguration(Bootstrap b, String name) {
+	public static Bootstrap removeConfiguration(Bootstrap b, String name) {
 		Objects.requireNonNull(b, "bootstrap");
 		Objects.requireNonNull(name, "name");
-		if (b.config().handler() == null) {
-			return;
+		if (b.config().handler() != null) {
+			b.handler(removeConfiguration(b.config().handler(), name));
 		}
-		b.handler(removeConfiguration(b.config().handler(), name));
+		return b;
 	}
 
 	/**
@@ -353,7 +355,7 @@ public abstract class BootstrapHandlers {
 	 * @param b the bootstrap to setup
 	 * @param handler the logging handler to setup
 	 *
-	 * @return a mutated {@link Bootstrap#handler}
+	 * @return a mutated {@link Bootstrap}
 	 */
 	public static Bootstrap updateLogSupport(Bootstrap b, LoggingHandler handler) {
 		updateConfiguration(b, NettyPipeline.LoggingHandler, logConfiguration(handler, SSL_CLIENT_DEBUG));
@@ -366,7 +368,7 @@ public abstract class BootstrapHandlers {
 	 * @param b the bootstrap to setup
 	 * @param handler the logging handler to setup
 	 *
-	 * @return a mutated {@link ServerBootstrap#childHandler}
+	 * @return a mutated {@link ServerBootstrap}
 	 */
 	public static ServerBootstrap updateLogSupport(ServerBootstrap b,
 												   LoggingHandler handler) {
@@ -428,24 +430,7 @@ public abstract class BootstrapHandlers {
 
 	static BiConsumer<ConnectionObserver, ? super Channel> logConfiguration(LoggingHandler handler, boolean debugSsl) {
 		Objects.requireNonNull(handler, "loggingHandler");
-		return (listener, channel) -> {
-			if (channel.pipeline().get(NettyPipeline.SslHandler) != null) {
-				if (debugSsl) {
-					channel.pipeline()
-							.addBefore(NettyPipeline.SslHandler,
-									NettyPipeline.SslLoggingHandler,
-									new LoggingHandler("reactor.netty.tcp.ssl"));
-				}
-				channel.pipeline()
-						.addAfter(NettyPipeline.SslHandler,
-						          NettyPipeline.LoggingHandler,
-						          handler);
-			}
-			else {
-				channel.pipeline()
-						.addFirst(NettyPipeline.LoggingHandler, handler);
-			}
-		};
+		return new LoggingHandlerSupportConsumer(handler, debugSsl);
 	}
 
 	@ChannelHandler.Sharable
@@ -510,6 +495,24 @@ public abstract class BootstrapHandlers {
 			this.deferredConsumer = deferredConsumer;
 		}
 
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			PipelineConfiguration that = (PipelineConfiguration) o;
+			return Objects.equals(consumer, that.consumer) &&
+					Objects.equals(name, that.name) &&
+					Objects.equals(deferredConsumer, that.deferredConsumer);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(consumer, name, deferredConsumer);
+		}
 	}
 
 	static final class BootstrapPipelineHandler extends ArrayList<PipelineConfiguration>
@@ -554,4 +557,56 @@ public abstract class BootstrapHandlers {
 	static final ChannelOption<ChannelOperations.OnSetup> OPS_OPTION = ChannelOption.newInstance("ops_factory");
 	static final ChannelOption<ConnectionObserver> OBSERVER_OPTION = ChannelOption.newInstance("connectionObserver");
 
+
+	static final class LoggingHandlerSupportConsumer
+			implements BiConsumer<ConnectionObserver, Channel> {
+
+		final ChannelHandler handler;
+		final boolean debugSsl;
+
+		LoggingHandlerSupportConsumer(ChannelHandler handler, boolean debugSsl) {
+			this.handler = handler;
+			this.debugSsl = debugSsl;
+		}
+
+		@Override
+		public void accept(ConnectionObserver connectionObserver, Channel channel) {
+			ChannelPipeline pipeline = channel.pipeline();
+			if (pipeline.get(NettyPipeline.SslHandler) != null) {
+				if (debugSsl) {
+					pipeline.addBefore(NettyPipeline.SslHandler,
+							NettyPipeline.SslLoggingHandler,
+							new LoggingHandler("reactor.netty.tcp.ssl"));
+				}
+				pipeline.addAfter(NettyPipeline.SslHandler,
+						NettyPipeline.LoggingHandler,
+						handler);
+			}
+			else if (pipeline.get(NettyPipeline.ProxyHandler) != null) {
+				pipeline.addAfter(NettyPipeline.ProxyHandler,
+						NettyPipeline.LoggingHandler,
+						handler);
+			}
+			else {
+				pipeline.addFirst(NettyPipeline.LoggingHandler, handler);
+			}
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			LoggingHandlerSupportConsumer that = (LoggingHandlerSupportConsumer) o;
+			return Objects.equals(handler, that.handler);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(handler);
+		}
+	}
 }

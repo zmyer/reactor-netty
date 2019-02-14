@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,7 +70,6 @@ public class ByteBufFluxTest {
 
         // Use the ByteBufFlux to read the file in chunks of 3 bytes max and write them into a ByteArrayOutputStream for verification
         final Iterator<ByteBuf> it = ByteBufFlux.fromPath(tmpFile, chunkSize)
-                                                .retain()
                                                 .toIterable()
                                                 .iterator();
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -150,11 +149,11 @@ public class ByteBufFluxTest {
         DisposableServer c = server.handle((req, res) ->
                                        res.send(ByteBufFlux.fromPath(path))
                                           .then())
-                                   .wiretap()
+                                   .wiretap(true)
                                    .bindNow();
 
         AtomicLong counter = new AtomicLong(0);
-        client.wiretap()
+        client.wiretap(true)
               .get()
               .uri("/download")
               .responseContent()

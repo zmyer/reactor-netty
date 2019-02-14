@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -31,10 +32,13 @@ import org.junit.Test;
 import reactor.core.publisher.EmitterProcessor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import reactor.netty.ByteBufFlux;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.http.server.HttpServer;
+import reactor.netty.http.server.HttpServerRequest;
+import reactor.netty.http.server.HttpServerResponse;
 import reactor.netty.tcp.SslProvider;
 import reactor.test.StepVerifier;
 
@@ -50,13 +54,13 @@ public class HttpTests {
 				          .port(0)
 				          .route(r ->
 				              r.post("/test/{param}", (req, res) -> Mono.empty()))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		HttpClient client =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		Mono<ByteBuf> content =
 				client.headers(h -> h.add("Content-Type", "text/plain"))
@@ -73,7 +77,7 @@ public class HttpTests {
 				    .expectComplete()
 				    .verify(Duration.ofSeconds(5000));
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -88,13 +92,13 @@ public class HttpTests {
 				                                    .log("server-received")
 				                                    .map(it -> it + ' ' + req.param("param") + '!')
 				                                    .log("server-reply"))))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		HttpClient client =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		Mono<String> content =
 				client.headers(h -> h.add("Content-Type", "text/plain"))
@@ -113,7 +117,7 @@ public class HttpTests {
 				    .expectComplete()
 				    .verify(Duration.ofSeconds(30));
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -165,13 +169,13 @@ public class HttpTests {
 						                                                      .then()
 						                                                      .log("send-5")
 						                                                      .doOnError(t -> errored5.countDown())))
-						  .wiretap()
+						  .wiretap(true)
 						  .bindNow();
 
 		HttpClient client =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .wiretap();
+				          .wiretap(true);
 
 		Mono<Integer> code =
 				client.get()
@@ -247,7 +251,7 @@ public class HttpTests {
 		            .expectNext(500)
 		            .verifyComplete();
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 /*	@Test
@@ -324,7 +328,7 @@ public class HttpTests {
 					                                       return res.sendString(Mono.just(s))
 					                                                 .then();
 				                                       }))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		String content =
@@ -343,7 +347,7 @@ public class HttpTests {
 
 		Assertions.assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue();
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -363,14 +367,14 @@ public class HttpTests {
 						                              .then(res.compression(true)
 						                                       .options(op -> op.flushOnEach())
 						                                       .sendString(ep.log()).then())))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 
 		String content =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .compress()
+				          .compress(true)
 				          .post()
 				          .uri("/hi")
 				          .send(ByteBufFlux.fromString(Flux.just("1", "2", "3", "4", "5")))
@@ -382,7 +386,7 @@ public class HttpTests {
 
 		Flux<String> f = HttpClient.create()
 		                           .port(server.address().getPort())
-		                           .compress()
+		                           .compress(true)
 		                           .get()
 		                           .uri("/stream")
 		                           .responseContent()
@@ -405,7 +409,7 @@ public class HttpTests {
 		content =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .compress()
+				          .compress(true)
 				          .post()
 				          .uri("/hi")
 				          .send(ByteBufFlux.fromString(Flux.just("1", "2", "3", "4", "5")))
@@ -416,7 +420,7 @@ public class HttpTests {
 				          .block();
 
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 
@@ -427,7 +431,7 @@ public class HttpTests {
 		DisposableServer server =
 				HttpServer.create()
 				          .port(0)
-				          .compress()
+				          .compress(true)
 				          .route(r -> r.post("/hi", (req, res) -> req.receive()
 				                                                     .aggregate()
 				                                                     .asString()
@@ -438,14 +442,14 @@ public class HttpTests {
 						                           req.receive()
 						                              .then(res.options(op -> op.flushOnEach())
 						                                       .sendString(ep.log()).then())))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 
 		String content =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .compress()
+				          .compress(true)
 				          .post()
 				          .uri("/hi")
 				          .send(ByteBufFlux.fromString(Flux.just("1", "2", "3", "4", "5")))
@@ -457,7 +461,7 @@ public class HttpTests {
 
 		Flux<String> f = HttpClient.create()
 		                           .port(server.address().getPort())
-		                           .compress()
+		                           .compress(true)
 		                           .get()
 		                           .uri("/stream")
 		                           .responseContent()
@@ -480,7 +484,7 @@ public class HttpTests {
 		content =
 				HttpClient.create()
 				          .port(server.address().getPort())
-				          .compress()
+				          .compress(true)
 				          .post()
 				          .uri("/hi")
 				          .send(ByteBufFlux.fromString(Flux.just("1", "2", "3", "4", "5")))
@@ -491,7 +495,7 @@ public class HttpTests {
 				          .block();
 
 
-		server.dispose();
+		server.disposeNow();
 	}
 
 	@Test
@@ -504,7 +508,7 @@ public class HttpTests {
 				          .secure(sslContextSpec -> sslContextSpec.sslContext(serverOptions)
 				                                                  .defaultConfiguration(SslProvider.DefaultConfigurationType.H2))
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		String response =
@@ -513,7 +517,7 @@ public class HttpTests {
 				          .secure(ssl -> ssl.sslContext(
 				                  SslContextBuilder.forClient()
 				                                   .trustManager(InsecureTrustManagerFactory.INSTANCE)))
-				          .wiretap()
+				          .wiretap(true)
 				          .get()
 				          .uri("/")
 				          .responseContent()
@@ -526,6 +530,53 @@ public class HttpTests {
 
 	@Test
 	@Ignore
+	public void testNettyOom() throws Exception {
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; i < 1000; i++) {
+			sb.append("test");
+		}
+
+		SelfSignedCertificate cert = new SelfSignedCertificate();
+		SslContextBuilder serverOptions = SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
+		DisposableServer server =
+				HttpServer.create()
+				          .secure(sslContextSpec -> sslContextSpec.sslContext(serverOptions))
+				          .handle((req, res) -> res.sendString(Mono.just("Hello "+Mono.just(sb.toString()))
+				                                                   .delayElement
+						                                                   (Duration.ofMillis(500))))
+				          .wiretap(true)
+				          .bindNow();
+
+		Mono<String> res =
+				HttpClient.create()
+				          .port(server.port())
+				          .secure(ssl -> ssl.sslContext(
+						          SslContextBuilder.forClient()
+						                           .trustManager
+								                           (InsecureTrustManagerFactory
+										                           .INSTANCE))
+				                            .defaultConfiguration(SslProvider
+						                            .DefaultConfigurationType.TCP)
+				                            .handshakeTimeoutMillis(30000))
+				          .wiretap(true)
+				          .post()
+				          .uri("/")
+				          .send(ByteBufFlux.fromString(Mono.just(sb.toString())))
+				          .responseContent()
+				          .aggregate()
+				          .asString();
+
+		Mono.just(1)
+		    .repeat()
+			.flatMap(i -> res.subscribeOn(Schedulers.elastic()))
+			.blockLast();
+
+		server.disposeNow();
+	}
+
+
+	@Test
+	@Ignore
 	public void testHttpSsl() throws Exception {
 		SelfSignedCertificate cert = new SelfSignedCertificate();
 		SslContextBuilder serverOptions = SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
@@ -534,39 +585,40 @@ public class HttpTests {
 				          .port(8080)
 				          .secure(sslContextSpec -> sslContextSpec.sslContext(serverOptions))
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		new CountDownLatch(1).await();
 		server.disposeNow();
 	}
 
-	@Test
-	@Ignore
-	public void testHttpToHttp2ClearText() {
-		DisposableServer server =
-				HttpServer.create()
-				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
-				          .bindNow();
-
-		StepVerifier.create(
-				HttpClient.create()
-				          .port(server.port())
-				          .wiretap()
-				          .post()
-				          .uri("/")
-//				          .send((req, out) -> out.sendString(Mono.just("World")))
-				          .responseContent()
-				          .aggregate()
-				          .asString()
-		)
-		            .expectNext("Hello")
-		            .verifyComplete();
-
-
-		server.disposeNow();
-	}
+//	@Test
+//	public void testHttpToHttp2ClearText() {
+//		DisposableServer server =
+//				HttpServer.create()
+//				          .protocol(HttpProtocol.H2C)
+//				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
+//				          .wiretap()
+//				          .bindNow();
+//
+//		StepVerifier.create(
+//				HttpClient.create()
+//				          .port(server.port())
+//				          .protocol(HttpProtocol.H2C)
+//				          .wiretap()
+//				          .post()
+//				          .uri("/")
+////				          .send((req, out) -> out.sendString(Mono.just("World")))
+//				          .responseContent()
+//				          .aggregate()
+//				          .asString()
+//		)
+//		            .expectNext("Hello")
+//		            .verifyComplete();
+//
+//
+//		server.disposeNow();
+//	}
 
 	@Test
 	@Ignore
@@ -579,7 +631,7 @@ public class HttpTests {
 				          .protocol(HttpProtocol.H2C)
 				          .port(8080)
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		new CountDownLatch(1).await();
@@ -597,7 +649,7 @@ public class HttpTests {
 				          .protocol(HttpProtocol.H2C, HttpProtocol.HTTP11)
 				          .port(8080)
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		new CountDownLatch(1).await();
@@ -616,7 +668,47 @@ public class HttpTests {
 				          .secure(ssl -> ssl.sslContext(serverOptions))
 				          .port(8080)
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
+				          .bindNow();
+
+		new CountDownLatch(1).await();
+		server.disposeNow();
+	}
+
+	@Test
+	@Ignore
+	public void testH2OrH1Secure() throws Exception {
+		SelfSignedCertificate cert = new SelfSignedCertificate();
+		SslContextBuilder serverOptions = SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
+
+		DisposableServer server =
+				HttpServer.create()
+				          .protocol(HttpProtocol.H2, HttpProtocol.HTTP11)
+				          .secure(ssl -> ssl.sslContext(serverOptions))
+				          .port(8080)
+				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
+				          .wiretap(true)
+				          .bindNow();
+
+		new CountDownLatch(1).await();
+		server.disposeNow();
+	}
+
+	@Test
+	@Ignore
+	public void testIssue395() throws Exception {
+		BiFunction<HttpServerRequest, HttpServerResponse, Mono<Void>> echoHandler =
+				(req, res) -> res.send(req.receive().map(ByteBuf::retain)).then();
+
+		SelfSignedCertificate cert = new SelfSignedCertificate();
+		SslContextBuilder serverOptions = SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
+		DisposableServer server =
+				HttpServer.create()
+				          .secure(ssl -> ssl.sslContext(serverOptions))
+				          .protocol(HttpProtocol.H2)
+				          .handle(echoHandler)
+				          .port(8080)
+				          .wiretap(true)
 				          .bindNow();
 
 		new CountDownLatch(1).await();
@@ -635,7 +727,7 @@ public class HttpTests {
 				          .secure(ssl -> ssl.sslContext(serverOptions))
 				          .port(8080)
 				          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-				          .wiretap()
+				          .wiretap(true)
 				          .bindNow();
 
 		new CountDownLatch(1).await();
@@ -648,7 +740,7 @@ public class HttpTests {
 			HttpServer.create()
 			          .protocol(HttpProtocol.H2)
 			          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-			          .wiretap()
+			          .wiretap(true)
 			          .bind()
 		).verifyErrorMessage("Configured H2 protocol without TLS. Use" +
 				" a clear-text h2 protocol via HttpServer#protocol or configure TLS" +
@@ -665,7 +757,7 @@ public class HttpTests {
 			          .protocol(HttpProtocol.H2C)
 			          .secure(ssl -> ssl.sslContext(serverOptions))
 			          .handle((req, res) -> res.sendString(Mono.just("Hello")))
-			          .wiretap()
+			          .wiretap(true)
 			          .bind()
 		).verifyErrorMessage("Configured H2 Clear-Text protocol with TLS. Use the non clear-text h2 protocol via HttpServer#protocol or disable TLS via HttpServer#tcpConfiguration(tcp -> tcp.noSSL())");
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,11 +22,10 @@ import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
 import javax.annotation.Nullable;
 
 import io.netty.bootstrap.Bootstrap;
@@ -46,7 +45,10 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.cookie.ClientCookieDecoder;
+import io.netty.handler.codec.http.cookie.ClientCookieEncoder;
 import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2FrameLogger;
@@ -63,6 +65,7 @@ import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
 import io.netty.handler.ssl.JdkSslContext;
 import io.netty.handler.ssl.SslContext;
 import io.netty.util.AsciiString;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import org.reactivestreams.Publisher;
@@ -72,11 +75,13 @@ import reactor.core.publisher.DirectProcessor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoSink;
+import reactor.core.publisher.Operators;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 import reactor.netty.FutureMono;
 import reactor.netty.NettyOutbound;
 import reactor.netty.NettyPipeline;
+import reactor.netty.ReactorNetty;
 import reactor.netty.channel.AbortedException;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.channel.ChannelOperations;
@@ -90,7 +95,7 @@ import reactor.util.Logger;
 import reactor.util.Loggers;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * @author Stephane Maldini
@@ -113,25 +118,6 @@ final class HttpClientConnect extends HttpClient {
 		return defaultClient;
 	}
 
-	static void channelFactoryAndLoops(Bootstrap b) {
-		if (b.config()
-		     .group() == null) {
-
-			LoopResources loops = HttpResources.get();
-
-			SslProvider ssl = SslProvider.findSslSupport(b);
-			SslContext sslContext = ssl != null ? ssl.getSslContext() : null;
-
-			boolean useNative =
-					LoopResources.DEFAULT_NATIVE && !(sslContext instanceof JdkSslContext);
-
-			EventLoopGroup elg = loops.onClient(useNative);
-
-			b.group(elg)
-			 .channel(loops.onChannel(elg));
-		}
-	}
-
 	static final class HttpTcpClient extends TcpClient {
 
 		final TcpClient defaultClient;
@@ -142,16 +128,60 @@ final class HttpClientConnect extends HttpClient {
 
 		@Override
 		public Mono<? extends Connection> connect(Bootstrap b) {
-			channelFactoryAndLoops(b);
-			BootstrapHandlers.channelOperationFactory(b, HTTP_OPS);
-			HttpClientConfiguration conf = HttpClientConfiguration.getAndClean(b);
+			SslProvider ssl = SslProvider.findSslSupport(b);
 
-			if (conf.deferredUri != null) {
-				return conf.deferredUri.flatMap(uri ->
-						new MonoHttpConnect(b, new HttpClientConfiguration(conf, uri), defaultClient));
+			if (b.config()
+			     .group() == null) {
+
+				LoopResources loops = HttpResources.get();
+
+				SslContext sslContext = ssl != null ? ssl.getSslContext() : null;
+
+				boolean useNative =
+						LoopResources.DEFAULT_NATIVE && !(sslContext instanceof JdkSslContext);
+
+				EventLoopGroup elg = loops.onClient(useNative);
+
+				Integer maxConnections = (Integer) b.config().attrs().get(AttributeKey.valueOf("maxConnections"));
+
+				if (maxConnections != null && maxConnections != -1 && elg instanceof Supplier) {
+					EventLoopGroup delegate = (EventLoopGroup) ((Supplier) elg).get();
+					b.group(delegate)
+					 .channel(loops.onChannel(delegate));
+				}
+				else {
+					b.group(elg)
+					 .channel(loops.onChannel(elg));
+				}
 			}
 
-			return new MonoHttpConnect(b, conf, defaultClient);
+			HttpClientConfiguration conf = HttpClientConfiguration.getAndClean(b);
+			BootstrapHandlers.channelOperationFactory(b,
+					(ch, c, msg) -> new HttpClientOperations(ch, c, conf.cookieEncoder, conf.cookieDecoder));
+
+			if (ssl != null) {
+				if (ssl.getDefaultConfigurationType() == null) {
+					switch (conf.protocols) {
+						case HttpClientConfiguration.h11:
+							ssl = SslProvider.updateDefaultConfiguration(ssl, SslProvider.DefaultConfigurationType.TCP);
+							break;
+						case HttpClientConfiguration.h2:
+							ssl = SslProvider.updateDefaultConfiguration(ssl, SslProvider.DefaultConfigurationType.H2);
+							break;
+					}
+				}
+				SslProvider.setBootstrap(b, ssl);
+			}
+
+			SslProvider defaultSsl = ssl;
+
+			if (conf.deferredConf != null) {
+				return Mono.fromCallable(() -> new HttpClientConfiguration(conf))
+				           .transform(conf.deferredConf)
+				           .flatMap(c -> new MonoHttpConnect(b, c, defaultClient, defaultSsl));
+			}
+
+			return new MonoHttpConnect(b, conf, defaultClient, defaultSsl);
 		}
 
 		@Override
@@ -173,60 +203,113 @@ final class HttpClientConnect extends HttpClient {
 	}
 
 
-	static final ChannelOperations.OnSetup HTTP_OPS =
-			(ch, c, msg) -> new HttpClientOperations(ch, c);
-
 	static final class MonoHttpConnect extends Mono<Connection> {
 
 		final Bootstrap               bootstrap;
 		final HttpClientConfiguration configuration;
 		final TcpClient               tcpClient;
+		final SslProvider             sslProvider;
+		final ProxyProvider           proxyProvider;
 
 		MonoHttpConnect(Bootstrap bootstrap,
 				HttpClientConfiguration configuration,
-				TcpClient tcpClient) {
+				TcpClient tcpClient,
+				@Nullable SslProvider               sslProvider) {
 			this.bootstrap = bootstrap;
 			this.configuration = configuration;
+			this.sslProvider = sslProvider;
 			this.tcpClient = tcpClient;
+			this.proxyProvider = ProxyProvider.findProxySupport(bootstrap);
 		}
 
 		@Override
 		public void subscribe(CoreSubscriber<? super Connection> actual) {
 			final Bootstrap b = bootstrap.clone();
 
-			SslProvider ssl = SslProvider.findSslSupport(b);
-			if (ssl != null) {
-				SslProvider.updateSslSupport(b,
-						SslProvider.addHandlerConfigurator(ssl,
-								HttpClientSecure.DEFAULT_HOSTNAME_VERIFICATION));
-			}
-
 			HttpClientHandler handler = new HttpClientHandler(configuration, b.config()
-			                                                                  .remoteAddress(), ssl);
+			                                                                  .remoteAddress(), sslProvider, proxyProvider);
 
 			b.remoteAddress(handler);
 
-			BootstrapHandlers.updateConfiguration(b,
-					NettyPipeline.HttpInitializer,
-					(listener, channel) -> {
-						channel.pipeline()
-						       .addLast(NettyPipeline.HttpCodec, new HttpClientCodec());
+			if (sslProvider != null) {
+				if ((configuration.protocols & HttpClientConfiguration.h2c) == HttpClientConfiguration.h2c) {
+					Operators.error(actual, new IllegalArgumentException("Configured" +
+							" H2 Clear-Text protocol " +
+							"with TLS. Use the non clear-text h2 protocol via " +
+							"HttpClient#protocol or disable TLS" +
+							" via HttpClient#tcpConfiguration(tcp -> tcp.noSSL())"));
+					return;
+				}
+				if ((configuration.protocols & HttpClientConfiguration.h11) == HttpClientConfiguration.h11) {
+					BootstrapHandlers.updateConfiguration(b, NettyPipeline.HttpInitializer,
+							new Http1Initializer(handler, configuration.protocols));
+//					return;
+				}
+//				if ((configuration.protocols & HttpClientConfiguration.h2) == HttpClientConfiguration.h2) {
+//					BootstrapHandlers.updateConfiguration(b,
+//							NettyPipeline.HttpInitializer,
+//							new H2Initializer(
+//									configuration.decoder.validateHeaders,
+//									configuration.minCompressionSize,
+//									compressPredicate(configuration.compressPredicate, configuration.minCompressionSize),
+//									configuration.forwarded));
+//					return;
+//				}
+			}
+			else {
+				if ((configuration.protocols & HttpClientConfiguration.h2) == HttpClientConfiguration.h2) {
+					Operators.error(actual, new IllegalArgumentException(
+							"Configured H2 protocol without TLS. Use" + " a clear-text " + "h2 protocol via HttpClient#protocol or configure TLS" + " via HttpClient#secure"));
+					return;
+				}
+//				if ((configuration.protocols & HttpClientConfiguration.h11orH2c) == HttpClientConfiguration.h11orH2c) {
+//					BootstrapHandlers.updateConfiguration(b,
+//							NettyPipeline.HttpInitializer,
+//							new Http1OrH2CleartextInitializer(configuration.decoder.maxInitialLineLength,
+//									configuration.decoder.maxHeaderSize,
+//									configuration.decoder.maxChunkSize,
+//									configuration.decoder.validateHeaders,
+//									configuration.decoder.initialBufferSize,
+//									configuration.minCompressionSize,
+//									compressPredicate(configuration.compressPredicate, configuration.minCompressionSize),
+//									configuration.forwarded));
+//					return;
+//				}
+				if ((configuration.protocols & HttpClientConfiguration.h11) == HttpClientConfiguration.h11) {
+					BootstrapHandlers.updateConfiguration(b,
+							NettyPipeline.HttpInitializer,
+							new Http1Initializer(handler, configuration.protocols));
+//					return;
+				}
+//				if ((configuration.protocols & HttpClientConfiguration.h2c) == HttpClientConfiguration.h2c) {
+//					BootstrapHandlers.updateConfiguration(b,
+//							NettyPipeline.HttpInitializer,
+//							new H2CleartextInitializer(
+//									conf.decoder.validateHeaders,
+//									conf.minCompressionSize,
+//									compressPredicate(conf.compressPredicate, conf.minCompressionSize),
+//									conf.forwarded));
+//					return;
+//				}
+			}
 
-						if (handler.compress) {
-							channel.pipeline()
-							       .addAfter(NettyPipeline.HttpCodec,
-							                 NettyPipeline.HttpDecompressor,
-							                 new HttpContentDecompressor());
-						}
-
-					});
+//			Operators.error(actual, new IllegalArgumentException("An unknown " +
+//					"HttpClient#protocol " + "configuration has been provided: "+String.format("0x%x", configuration.protocols)));
 
 			Mono.<Connection>create(sink -> {
 				Bootstrap finalBootstrap;
 				//append secure handler if needed
 				if (handler.activeURI.isSecure()) {
-					if (ssl == null) {
-						finalBootstrap = SslProvider.updateSslSupport(b.clone(),
+					if (sslProvider == null) {
+						if ((configuration.protocols & HttpClientConfiguration.h2c) == HttpClientConfiguration.h2c) {
+							sink.error(new IllegalArgumentException("Configured H2 " +
+									"Clear-Text" + " protocol" + " without TLS while " +
+									"trying to redirect to a secure address."));
+							return;
+						}
+						//should not need to handle H2 case already checked outside of
+						// this callback
+						finalBootstrap = SslProvider.setBootstrap(b.clone(),
 								HttpClientSecure.DEFAULT_HTTP_SSL_PROVIDER);
 					}
 					else {
@@ -234,7 +317,7 @@ final class HttpClientConnect extends HttpClient {
 					}
 				}
 				else {
-					if (ssl != null) {
+					if (sslProvider != null) {
 						finalBootstrap = SslProvider.removeSslSupport(b.clone());
 					}
 					else {
@@ -243,7 +326,7 @@ final class HttpClientConnect extends HttpClient {
 				}
 
 				BootstrapHandlers.connectionObserver(finalBootstrap,
-						BootstrapHandlers.connectionObserver(finalBootstrap).then(new HttpObserver(sink, handler)));
+						new HttpObserver(sink, handler).then(BootstrapHandlers.connectionObserver(finalBootstrap)));
 
 				tcpClient.connect(finalBootstrap)
 				         .subscribe(new TcpClientSubscriber(sink));
@@ -267,7 +350,7 @@ final class HttpClientConnect extends HttpClient {
 
 			@Override
 			public void onNext(Connection connection) {
-
+				sink.onCancel(connection);
 			}
 
 			@Override
@@ -304,13 +387,23 @@ final class HttpClientConnect extends HttpClient {
 
 		@Override
 		public void onUncaughtException(Connection connection, Throwable error) {
+			if (error instanceof RedirectClientException && log.isDebugEnabled()) {
+				log.debug(format(connection.channel(), "The request will be redirected"));
+			}
+			else if (AbortedException.isConnectionReset(error) && log.isDebugEnabled()) {
+				log.debug(format(connection.channel(), "The connection observed an error, " +
+						"the request will be retried"), error);
+			}
+			else if (log.isWarnEnabled()) {
+				log.warn(format(connection.channel(), "The connection observed an error"), error);
+			}
 			sink.error(error);
 		}
 
 		@Override
 		@SuppressWarnings("unchecked")
 		public void onStateChange(Connection connection, State newState) {
-			if (newState == HttpClientOperations.RESPONSE_RECEIVED) {
+			if (newState == HttpClientState.RESPONSE_RECEIVED) {
 				sink.success(connection);
 				return;
 			}
@@ -322,9 +415,9 @@ final class HttpClientConnect extends HttpClient {
 				handler.channel(connection.channel());
 
 //				Mono.fromDirect(initializer.upgraded)
-//				    .then(Mono.defer(() -> Mono.fromDirect(handler.requestWithbody((HttpClientOperations)connection))))
+//				    .then(Mono.defer(() -> Mono.fromDirect(handler.requestWithBody((HttpClientOperations)connection))))
 //				    .subscribe(connection.disposeSubscriber());
-				Mono.defer(() -> Mono.fromDirect(handler.requestWithbody((HttpClientOperations)connection)))
+				Mono.defer(() -> Mono.fromDirect(handler.requestWithBody((HttpClientOperations)connection)))
 				    .subscribe(connection.disposeSubscriber());
 			}
 		}
@@ -337,21 +430,33 @@ final class HttpClientConnect extends HttpClient {
 		final HttpHeaders        defaultHeaders;
 		final BiFunction<? super HttpClientRequest, ? super NettyOutbound, ? extends Publisher<Void>>
 		                         handler;
-		final boolean            followRedirect;
 		final boolean            compress;
 		final Boolean            chunkedTransfer;
 		final UriEndpointFactory uriEndpointFactory;
 		final String             websocketProtocols;
+		final int                maxFramePayloadLength;
+
+		final ClientCookieEncoder cookieEncoder;
+		final ClientCookieDecoder cookieDecoder;
+
+		final BiPredicate<HttpClientRequest, HttpClientResponse> followRedirectPredicate;
+
+		final ProxyProvider proxyProvider;
 
 		volatile UriEndpoint        activeURI;
 		volatile Supplier<String>[] redirectedFrom;
+		volatile boolean retried;
 
 		@SuppressWarnings("unchecked")
-		HttpClientHandler(HttpClientConfiguration configuration, @Nullable SocketAddress address, @Nullable SslProvider sslProvider) {
+		HttpClientHandler(HttpClientConfiguration configuration, @Nullable SocketAddress address,
+				@Nullable SslProvider sslProvider, @Nullable ProxyProvider proxyProvider) {
 			this.method = configuration.method;
 			this.compress = configuration.acceptGzip;
-			this.followRedirect = configuration.followRedirect;
+			this.followRedirectPredicate = configuration.followRedirectPredicate;
 			this.chunkedTransfer = configuration.chunkedTransfer;
+			this.cookieEncoder = configuration.cookieEncoder;
+			this.cookieDecoder = configuration.cookieDecoder;
+			this.proxyProvider = proxyProvider;
 
 			HttpHeaders defaultHeaders = configuration.headers;
 			if (compress) {
@@ -376,7 +481,7 @@ final class HttpClientConnect extends HttpClient {
 
 			if (baseUrl != null && uri.startsWith("/")) {
 				if (baseUrl.endsWith("/")) {
-					baseUrl = baseUrl.substring(0, baseUrl.length() - 2);
+					baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
 				}
 				uri = baseUrl + uri;
 			}
@@ -393,16 +498,23 @@ final class HttpClientConnect extends HttpClient {
 					new UriEndpointFactory(addressSupplier, sslProvider != null, URI_ADDRESS_MAPPER);
 
 			this.websocketProtocols = configuration.websocketSubprotocols;
+			this.maxFramePayloadLength = configuration.websocketMaxFramePayloadLength;
 			this.handler = configuration.body;
 			this.activeURI = uriEndpointFactory.createUriEndpoint(uri, configuration.websocketSubprotocols != null);
 		}
 
 		@Override
 		public SocketAddress get() {
-			return activeURI.getRemoteAddress();
+			SocketAddress address = activeURI.getRemoteAddress();
+			if (proxyProvider != null && !proxyProvider.shouldProxy(address) &&
+					address instanceof InetSocketAddress) {
+				address = InetSocketAddressUtil.replaceWithResolved((InetSocketAddress) address);
+			}
+
+			return address;
 		}
 
-		public Publisher<Void> requestWithbody(HttpClientOperations ch) {
+		Publisher<Void> requestWithBody(HttpClientOperations ch) {
 			try {
 				UriEndpoint uri = activeURI;
 				HttpHeaders headers = ch.getNettyRequest()
@@ -419,33 +531,34 @@ final class HttpClientConnect extends HttpClient {
 					headers.set(HttpHeaderNames.USER_AGENT, USER_AGENT);
 				}
 
-				if (!headers.contains(HttpHeaderNames.HOST)) {
+				SocketAddress remoteAddress = uri.getRemoteAddress();
+				if (!headers.contains(HttpHeaderNames.HOST) && remoteAddress instanceof InetSocketAddress) {
 					headers.set(HttpHeaderNames.HOST,
-					            resolveHostHeaderValue(ch.address()));
+					            resolveHostHeaderValue((InetSocketAddress) remoteAddress));
 				}
 
 				if (!headers.contains(HttpHeaderNames.ACCEPT)) {
 					headers.set(HttpHeaderNames.ACCEPT, ALL);
 				}
 
-				ch.followRedirect(followRedirect);
+				ch.followRedirectPredicate(followRedirectPredicate);
 
-				if (Objects.equals(method, HttpMethod.GET) ||
-						Objects.equals(method, HttpMethod.HEAD) ||
-								Objects.equals(method, HttpMethod.DELETE)) {
-					ch.chunkedTransfer(false);
+				if (chunkedTransfer == null) {
+					if (Objects.equals(method, HttpMethod.GET) ||
+							Objects.equals(method, HttpMethod.HEAD) ||
+							Objects.equals(method, HttpMethod.DELETE)) {
+						ch.chunkedTransfer(false);
+					} else if (!headers.contains(HttpHeaderNames.CONTENT_LENGTH)) {
+						ch.chunkedTransfer(true);
+					}
 				}
 				else {
-					ch.chunkedTransfer(true);
-				}
-
-				if (chunkedTransfer != null) {
 					ch.chunkedTransfer(chunkedTransfer);
 				}
 
 				if (handler != null) {
 					if (websocketProtocols != null) {
-						WebsocketUpgradeOutbound wuo = new WebsocketUpgradeOutbound(ch, websocketProtocols);
+						WebsocketUpgradeOutbound wuo = new WebsocketUpgradeOutbound(ch, websocketProtocols, maxFramePayloadLength, compress);
 						return Flux.concat(handler.apply(ch, wuo), wuo.then());
 					}
 					else {
@@ -454,7 +567,7 @@ final class HttpClientConnect extends HttpClient {
 				}
 				else {
 					if (websocketProtocols != null) {
-						return Mono.fromRunnable(() -> ch.withWebsocketSupport(websocketProtocols));
+						return Mono.fromRunnable(() -> ch.withWebsocketSupport(websocketProtocols, maxFramePayloadLength, compress));
 					}
 					else {
 						return ch.send();
@@ -466,13 +579,9 @@ final class HttpClientConnect extends HttpClient {
 			}
 		}
 
-		private static String resolveHostHeaderValue(@Nullable InetSocketAddress remoteAddress) {
+		static String resolveHostHeaderValue(@Nullable InetSocketAddress remoteAddress) {
 			if (remoteAddress != null) {
-				String host = remoteAddress.getHostString();
-				if (VALID_IPV6_PATTERN.matcher(host)
-				                      .matches()) {
-					host = "[" + host + "]";
-				}
+				String host = HttpUtil.formatHostnameForHttp(remoteAddress);
 				int port = remoteAddress.getPort();
 				if (port != 80 && port != 443) {
 					host = host + ':' + port;
@@ -498,7 +607,7 @@ final class HttpClientConnect extends HttpClient {
 		}
 
 		@SuppressWarnings("unchecked")
-		private static Supplier<String>[] addToRedirectedFromArray(@Nullable Supplier<String>[] redirectedFrom,
+		static Supplier<String>[] addToRedirectedFromArray(@Nullable Supplier<String>[] redirectedFrom,
 				UriEndpoint from) {
 			Supplier<String> fromUrlSupplier = from::toExternalForm;
 			if (redirectedFrom == null) {
@@ -520,8 +629,10 @@ final class HttpClientConnect extends HttpClient {
 		void channel(Channel channel) {
 			Supplier<String>[] redirectedFrom = this.redirectedFrom;
 			if (redirectedFrom != null) {
-				channel.attr(HttpClientOperations.REDIRECT_ATTR_KEY)
-				       .set(redirectedFrom);
+				ChannelOperations<?, ?> ops = ChannelOperations.get(channel);
+				if (ops instanceof HttpClientOperations) {
+					((HttpClientOperations) ops).redirectedFrom = redirectedFrom;
+				}
 			}
 		}
 
@@ -532,7 +643,8 @@ final class HttpClientConnect extends HttpClient {
 				redirect(re.location);
 				return true;
 			}
-			if (AbortedException.isConnectionReset(throwable)) {
+			if (AbortedException.isConnectionReset(throwable) && !retried) {
+				retried = true;
 				redirect(activeURI.toString());
 				return true;
 			}
@@ -551,10 +663,11 @@ final class HttpClientConnect extends HttpClient {
 		final Mono<Void>           m;
 		final String               websocketProtocols;
 
-		WebsocketUpgradeOutbound(HttpClientOperations ch, String websocketProtocols) {
+		WebsocketUpgradeOutbound(HttpClientOperations ch, String websocketProtocols, int websocketMaxFramePayloadLength,
+				boolean compress) {
 			this.ch = ch;
 			this.websocketProtocols = websocketProtocols;
-			this.m = Mono.fromRunnable(() -> ch.withWebsocketSupport(websocketProtocols));
+			this.m = Mono.fromRunnable(() -> ch.withWebsocketSupport(websocketProtocols, websocketMaxFramePayloadLength, compress));
 		}
 
 		@Override
@@ -570,6 +683,7 @@ final class HttpClientConnect extends HttpClient {
 
 		@Override
 		public NettyOutbound sendObject(Object message) {
+			ch.onTerminate().subscribe(null, null, () -> ReactorNetty.safeRelease(message));
 			return then(FutureMono.deferFuture(() -> ch.channel()
 			                                           .writeAndFlush(message)));
 		}
@@ -601,17 +715,74 @@ final class HttpClientConnect extends HttpClient {
 		}
 	}
 
-	static final Pattern VALID_IPV6_PATTERN;
+	static final class Http1Initializer
+			implements BiConsumer<ConnectionObserver, Channel>  {
 
-	static {
-		try {
-			VALID_IPV6_PATTERN = Pattern.compile("([0-9a-f]{1,4}:){7}([0-9a-f]){1,4}",
-			                                     Pattern.CASE_INSENSITIVE);
+		final HttpClientHandler handler;
+		final int protocols;
+
+		Http1Initializer(HttpClientHandler handler, int protocols) {
+			this.handler = handler;
+			this.protocols = protocols;
 		}
-		catch (PatternSyntaxException e) {
-			throw new IllegalStateException("Impossible");
+
+		@Override
+		public void accept(ConnectionObserver listener, Channel channel) {
+			channel.pipeline()
+			       .addLast(NettyPipeline.HttpCodec, new HttpClientCodec());
+
+			if (handler.compress) {
+				channel.pipeline()
+				       .addAfter(NettyPipeline.HttpCodec,
+						       NettyPipeline.HttpDecompressor,
+						       new HttpContentDecompressor());
+			}
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) {
+				return true;
+			}
+			if (o == null || getClass() != o.getClass()) {
+				return false;
+			}
+			Http1Initializer that = (Http1Initializer) o;
+			return handler.compress == that.handler.compress &&
+					protocols == that.protocols;
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(handler.compress, protocols);
 		}
 	}
+
+//	static final class H2Initializer
+//			implements BiConsumer<ConnectionObserver, Channel>  {
+//
+//		final HttpClientHandler handler;
+//
+//		H2Initializer(HttpClientHandler handler) {
+//			this.handler = handler;
+//		}
+//
+//		@Override
+//		public void accept(ConnectionObserver listener, Channel channel) {
+//			ChannelPipeline p = channel.pipeline();
+//
+//			Http2MultiplexCodecBuilder http2MultiplexCodecBuilder =
+//					Http2MultiplexCodecBuilder.forClient(new Http2StreamInitializer(listener, forwarded))
+//					                          .validateHeaders(validate)
+//					                          .initialSettings(Http2Settings.defaultSettings());
+//
+//			if (p.get(NettyPipeline.LoggingHandler) != null) {
+//				http2MultiplexCodecBuilder.frameLogger(new Http2FrameLogger(LogLevel.DEBUG, "reactor.netty.http.client.h2.secured"));
+//			}
+//
+//			p.addLast(NettyPipeline.HttpCodec, http2MultiplexCodecBuilder.build());
+//		}
+//	}
 
 	@ChannelHandler.Sharable
 	static final class HttpClientInitializer
@@ -668,7 +839,7 @@ final class HttpClientConnect extends HttpClient {
 
 		@Override
 		public ChannelOperations<?, ?> create(Connection c, ConnectionObserver listener, @Nullable Object msg) {
-			return new HttpClientOperations(c, listener);
+			return new HttpClientOperations(c, listener, handler.cookieEncoder, handler.cookieDecoder);
 		}
 
 		@Override
@@ -735,7 +906,7 @@ final class HttpClientConnect extends HttpClient {
 
 				p.addLast(http2MultiplexCodecBuilder.build());
 
-				openStream(ctx.channel(), listener, parent.upgraded, parent);
+				openStream(ctx.channel(), listener, parent);
 
 				return;
 			}
@@ -762,22 +933,26 @@ final class HttpClientConnect extends HttpClient {
 	}
 
 	static void openStream(Channel ch, ConnectionObserver listener,
-			DirectProcessor<Void> upgraded, GenericFutureListener<Future<Http2StreamChannel>> onStreamOpen) {
+			HttpClientInitializer initializer) {
 		Http2StreamChannelBootstrap http2StreamChannelBootstrap =
 				new Http2StreamChannelBootstrap(ch).handler(new ChannelInitializer() {
 					@Override
 					protected void initChannel(Channel ch) {
 						ch.pipeline().addLast(new Http2StreamFrameToHttpObjectCodec(false));
-						ChannelOperations.addReactiveBridge(ch, HTTP_OPS, listener);
+						ChannelOperations.addReactiveBridge(ch,
+								(conn, l, msg) -> new HttpClientOperations(conn, l,
+										initializer.handler.cookieEncoder,
+										initializer.handler.cookieDecoder),
+								listener);
 						if (log.isDebugEnabled()) {
 							log.debug(format(ch, "Initialized HTTP/2 pipeline {}"), ch.pipeline());
 						}
-						upgraded.onComplete();
+						initializer.upgraded.onComplete();
 					}
 				});
 
 		http2StreamChannelBootstrap.open()
-		                           .addListener(onStreamOpen);
+		                           .addListener(initializer);
 	}
 
 	static final class Http2StreamInitializer extends ChannelInitializer<Channel> {
@@ -794,8 +969,7 @@ final class HttpClientConnect extends HttpClient {
 
 	static final HttpClientConnect INSTANCE = new HttpClientConnect();
 	static final AsciiString       ALL      = new AsciiString("*/*");
-	static final Logger            log      =
-			Loggers.getLogger(HttpClientFinalizer.class);
+	static final Logger            log      = Loggers.getLogger(HttpClientConnect.class);
 
 
 	static final BiFunction<String, Integer, InetSocketAddress> URI_ADDRESS_MAPPER =

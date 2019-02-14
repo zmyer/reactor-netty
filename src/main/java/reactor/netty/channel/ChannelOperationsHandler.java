@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.FileRegion;
 import io.netty.handler.codec.DecoderResult;
-import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.DecoderResultProvider;
 import io.netty.util.ReferenceCountUtil;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
@@ -59,7 +59,7 @@ import reactor.util.Loggers;
 import reactor.util.concurrent.Queues;
 import reactor.util.context.Context;
 
-import static reactor.netty.LogFormatter.format;
+import static reactor.netty.ReactorNetty.format;
 
 /**
  * Netty {@link io.netty.channel.ChannelDuplexHandler} implementation that bridge data
@@ -125,7 +125,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 		}
 		catch (Throwable err) {
-			Exceptions.throwIfFatal(err);
+			Exceptions.throwIfJvmFatal(err);
 			exceptionCaught(ctx, err);
 		}
 	}
@@ -143,16 +143,16 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			else {
 				if (log.isDebugEnabled()) {
 					String loggingMsg = msg.toString();
-					if (msg instanceof HttpResponse) {
-						DecoderResult decoderResult = ((HttpResponse) msg).decoderResult();
+					if (msg instanceof DecoderResultProvider) {
+						DecoderResult decoderResult = ((DecoderResultProvider) msg).decoderResult();
 						if (decoderResult.isFailure()) {
 							log.debug(format(ctx.channel(), "Decoding failed: " + msg + " : "),
 									decoderResult.cause());
 						}
 					}
-					if (msg instanceof ByteBufHolder) {
-						loggingMsg = ((ByteBufHolder) msg).content()
-						                                  .toString(Charset.defaultCharset());
+					if (msg instanceof ByteBufHolder && ((ByteBufHolder)msg).content() != Unpooled.EMPTY_BUFFER) {
+						ByteBuf buffer = ((ByteBufHolder) msg).content();
+						loggingMsg = buffer.readCharSequence(buffer.readableBytes(), Charset.defaultCharset()).toString();
 					}
 					log.debug(format(ctx.channel(), "No ChannelOperation attached. Dropping: {}"),
 							loggingMsg);
@@ -161,7 +161,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 		}
 		catch (Throwable err) {
-			Exceptions.throwIfFatal(err);
+			Exceptions.throwIfJvmFatal(err);
 			exceptionCaught(ctx, err);
 			ReferenceCountUtil.safeRelease(msg);
 		}
@@ -229,7 +229,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
+	@SuppressWarnings({"unchecked", "FutureReturnValueIgnored"})
 	public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
 		if (log.isDebugEnabled() && msg != ChannelOperations.TERMINATED_OPS) {
 			log.debug(format(ctx.channel(), "Writing object {}"), msg);
@@ -242,6 +242,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 
 		if (!pendingWriteOffer.test(promise, msg)) {
+			// Returned value is deliberately ignored
 			promise.setFailure(new IllegalStateException("Send Queue full?!"));
 		}
 	}
@@ -356,7 +357,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 	}
 
-	@SuppressWarnings("unchecked")
+	@SuppressWarnings({"unchecked", "FutureReturnValueIgnored"})
 	void drain() {
 		if (WIP.getAndIncrement(this) == 0) {
 
@@ -404,7 +405,10 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					if (!future.isDone() && hasPendingWriteBytes()) {
 						ctx.flush();
 						if (!future.isDone() && hasPendingWriteBytes()) {
-							pendingWriteOffer.test(future, v);
+							if (!pendingWriteOffer.test(future, v) && future instanceof ChannelPromise) {
+								// Returned value is deliberately ignored
+								((ChannelPromise) future).setFailure(new IllegalStateException("Send Queue full?!"));
+							}
 						}
 					}
 					if (last && WIP.decrementAndGet(this) == 0) {
@@ -429,16 +433,19 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 								vr = supplier.call();
 							}
 							catch (Throwable e) {
+								// Returned value is deliberately ignored
 								promise.setFailure(e);
 								continue;
 							}
 	
 							if (vr == null) {
+								// Returned value is deliberately ignored
 								promise.setSuccess();
 								continue;
 							}
 	
 							if (inner.unbounded) {
+								// Returned value is deliberately ignored
 								doWrite(vr, promise, null);
 							}
 							else {
@@ -454,6 +461,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 						}
 					}
 					else {
+						// Returned value is deliberately ignored
 						doWrite(v, promise, null);
 					}
 				}
@@ -528,6 +536,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 
 		@Override
+		@SuppressWarnings("FutureReturnValueIgnored")
 		public void onComplete() {
 			long p = produced;
 			ChannelFuture f = lastWrite;
@@ -548,6 +557,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 						}
 					}
 					else {
+						// Returned value is deliberately ignored
 						promise.setFailure(new AbortedException("Connection has been closed"));
 						return;
 					}
@@ -558,10 +568,20 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				if (!f.isDone() && (parent.hasPendingWriteBytes() || !lastThreadInEventLoop)) {
 					EventLoop eventLoop = parent.ctx.channel().eventLoop();
 					if (eventLoop.inEventLoop()) {
-						parent.pendingWriteOffer.test(f, PENDING_WRITES);
+						if (!parent.pendingWriteOffer.test(f, PENDING_WRITES) && f instanceof ChannelPromise) {
+							// Returned value is deliberately ignored
+							((ChannelPromise) f).setFailure(new IllegalStateException("Send Queue full?!"));
+						}
 					}
 					else {
-						eventLoop.execute(() -> parent.pendingWriteOffer.test(f, PENDING_WRITES));
+						eventLoop.execute(() -> {
+							if (!f.isDone() && parent.hasPendingWriteBytes()) {
+								if (!parent.pendingWriteOffer.test(f, PENDING_WRITES) && f instanceof ChannelPromise) {
+									// Returned value is deliberately ignored
+									((ChannelPromise) f).setFailure(new IllegalStateException("Send Queue full?!"));
+								}
+							}
+						});
 					}
 				}
 				f.addListener(this);
@@ -569,12 +589,14 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			else {
 				produced = 0L;
 				produced(p);
+				// Returned value is deliberately ignored
 				promise.setSuccess();
 				parent.drain();
 			}
 		}
 
 		@Override
+		@SuppressWarnings("FutureReturnValueIgnored")
 		public void onError(Throwable t) {
 			long p = produced;
 			ChannelFuture f = lastWrite;
@@ -593,6 +615,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					}
 				}
 				else {
+					// Returned value is deliberately ignored
 					promise.setFailure(new AbortedException("Connection has been closed"));
 					return;
 				}
@@ -602,25 +625,36 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				if (!f.isDone() && (parent.hasPendingWriteBytes() || !lastThreadInEventLoop)) {
 					EventLoop eventLoop = parent.ctx.channel().eventLoop();
 					if (eventLoop.inEventLoop()) {
-						parent.pendingWriteOffer.test(f, PENDING_WRITES);
+						if (!parent.pendingWriteOffer.test(f, PENDING_WRITES) && f instanceof ChannelPromise) {
+							// Returned value is deliberately ignored
+							((ChannelPromise) f).setFailure(new IllegalStateException("Send Queue full?!"));
+						}
 					}
 					else {
-						eventLoop.execute(() -> parent.pendingWriteOffer.test(f, PENDING_WRITES));
+						eventLoop.execute(() -> {
+							if (!parent.pendingWriteOffer.test(f, PENDING_WRITES) && f instanceof ChannelPromise) {
+								// Returned value is deliberately ignored
+								((ChannelPromise) f).setFailure(new IllegalStateException("Send Queue full?!"));
+							}
+						});
 					}
 				}
 				f.addListener(future -> {
 					produced = 0L;
 					produced(p);
 					if (!future.isSuccess()) {
+						// Returned value is deliberately ignored
 						promise.setFailure(Exceptions.addSuppressed(future.cause(), t));
 						return;
 					}
+					// Returned value is deliberately ignored
 					promise.setFailure(t);
 				});
 			}
 			else {
 				produced = 0L;
 				produced(p);
+				// Returned value is deliberately ignored
 				promise.setFailure(t);
 				parent.drain();
 			}
@@ -643,9 +677,22 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			lastWrite = newPromise;
 		}
 
+		@SuppressWarnings("FutureReturnValueIgnored")
 		private void onNextInternal(Object t, ChannelPromise promise) {
+			if (!parent.ctx.channel()
+			               .isActive()) {
+				cancel();
+				if (log.isDebugEnabled()) {
+					log.debug(format(parent.ctx.channel(), "Dropping pending write, " +
+							"since connection has been closed: {}"), t);
+				}
+				ReferenceCountUtil.release(t);
+				return;
+			}
+
 			produced++;
 
+			// Returned value is deliberately ignored
 			parent.doWrite(t, promise, this);
 
 			if (parent.ctx.channel()
@@ -687,14 +734,17 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		}
 
 		@Override
+		@SuppressWarnings("FutureReturnValueIgnored")
 		public void operationComplete(ChannelFuture future) {
 			long p = produced;
 			produced = 0L;
 			produced(p);
 			if (future.isSuccess()) {
+				// Returned value is deliberately ignored
 				promise.setSuccess();
 			}
 			else {
+				// Returned value is deliberately ignored
 				promise.setFailure(future.cause());
 			}
 		}

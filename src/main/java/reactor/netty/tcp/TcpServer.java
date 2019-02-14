@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
@@ -35,7 +34,6 @@ import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.AttributeKey;
-import io.netty.util.NetUtil;
 import org.reactivestreams.Publisher;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
@@ -44,6 +42,7 @@ import reactor.netty.ConnectionObserver;
 import reactor.netty.DisposableServer;
 import reactor.netty.NettyInbound;
 import reactor.netty.NettyOutbound;
+import reactor.netty.NettyPipeline;
 import reactor.netty.channel.BootstrapHandlers;
 import reactor.netty.resources.LoopResources;
 import reactor.util.Logger;
@@ -144,7 +143,7 @@ public abstract class TcpServer {
 			b = configure();
 		}
 		catch (Throwable t){
-			Exceptions.throwIfFatal(t);
+			Exceptions.throwIfJvmFatal(t);
 			return Mono.error(t);
 		}
 		return bind(b);
@@ -446,7 +445,9 @@ public abstract class TcpServer {
 	 * @param sslContext The context to set when configuring SSL
 	 *
 	 * @return a new {@link TcpServer}
+	 * @deprecated Use {@link TcpServer#secure(Consumer)}
 	 */
+	@Deprecated
 	public final TcpServer secure(SslContext sslContext) {
 		return secure(sslProviderBuilder -> sslProviderBuilder.sslContext(sslContext));
 	}
@@ -472,7 +473,28 @@ public abstract class TcpServer {
 	 * @return a new {@link TcpServer}
 	 */
 	public final TcpServer secure(Consumer<? super SslProvider.SslContextSpec> sslProviderBuilder) {
-		return new TcpServerSecure(this, sslProviderBuilder);
+		return TcpServerSecure.secure(this, sslProviderBuilder);
+	}
+
+	/**
+	 * Apply an SSL configuration via the passed {@link SslProvider}.
+	 *
+	 * If {@link SelfSignedCertificate} needs to be used, the sample below can be
+	 * used. Note that {@link SelfSignedCertificate} should not be used in production.
+	 * <pre>
+	 * {@code
+	 *     SelfSignedCertificate cert = new SelfSignedCertificate();
+	 *     SslContextBuilder sslContextBuilder =
+	 *             SslContextBuilder.forServer(cert.certificate(), cert.privateKey());
+	 *     secure(sslContextSpec -> sslContextSpec.sslContext(sslContextBuilder));
+	 * }
+	 *
+	 * @param sslProvider The provider to set when configuring SSL
+	 *
+	 * @return a new {@link TcpServer}
+	 */
+	public final TcpServer secure(SslProvider sslProvider) {
+		return new TcpServerSecure(this, sslProvider);
 	}
 
 	/**
@@ -525,9 +547,28 @@ public abstract class TcpServer {
 	 * and {@code DEBUG} logger level
 	 *
 	 * @return a new {@link TcpServer}
+	 * @deprecated Use {@link TcpServer#wiretap(boolean)}
 	 */
+	@Deprecated
 	public final TcpServer wiretap() {
 		return bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER));
+	}
+
+	/**
+	 * Apply or remove a wire logger configuration using {@link TcpServer} category
+	 * and {@code DEBUG} logger level
+	 *
+	 * @param enable Specifies whether the wire logger configuration will be added to
+	 *               the pipeline
+	 * @return a new {@link TcpServer}
+	 */
+	public final TcpServer wiretap(boolean enable) {
+		if (enable) {
+			return bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER));
+		}
+		else {
+			return bootstrap(b -> BootstrapHandlers.removeConfiguration(b, NettyPipeline.LoggingHandler));
+		}
 	}
 
 	/**

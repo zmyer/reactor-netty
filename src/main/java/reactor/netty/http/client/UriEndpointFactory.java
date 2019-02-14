@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ final class UriEndpointFactory {
 	final BiFunction<String, Integer, InetSocketAddress> inetSocketAddressFunction;
 
 	static final Pattern URL_PATTERN = Pattern.compile(
-			"(?:(\\w+)://)?((?:\\[.+?])|(?<!\\[)(?:[^/]+?))(?::(\\d{2,5}))?(/.*)?");
+			"(?:(\\w+)://)?((?:\\[.+?])|(?<!\\[)(?:[^/?]+?))(?::(\\d{2,5}))?([/?].*)?");
 
 	UriEndpointFactory(Supplier<SocketAddress> connectAddress, boolean defaultSecure,
 			BiFunction<String, Integer, InetSocketAddress> inetSocketAddressFunction) {
@@ -84,6 +84,8 @@ final class UriEndpointFactory {
 		}
 		if (pathAndQuery.length() == 0) {
 			pathAndQuery = "/";
+		} else if (pathAndQuery.charAt(0) == '?') {
+			pathAndQuery = "/" + pathAndQuery;
 		}
 		return pathAndQuery;
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@ package reactor.netty.resources;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
@@ -91,7 +93,7 @@ public class PooledConnectionProviderTest {
 		//"register" our fake Pool
 		poolResources.channelPools.put(
 				new PooledConnectionProvider.PoolKey(
-						InetSocketAddress.createUnresolved("localhost", 80), ChannelOperations.OnSetup.empty()),
+						InetSocketAddress.createUnresolved("localhost", 80), -1),
 				pool);
 
 		Mono<Void> disposer = poolResources.disposeLater();
@@ -113,7 +115,7 @@ public class PooledConnectionProviderTest {
 		//"register" our fake Pool
 		poolResources.channelPools.put(
 				new PooledConnectionProvider.PoolKey(
-						InetSocketAddress.createUnresolved("localhost", 80), ChannelOperations.OnSetup.empty()),
+						InetSocketAddress.createUnresolved("localhost", 80), -1),
 				pool);
 
 		poolResources.dispose();
@@ -129,11 +131,14 @@ public class PooledConnectionProviderTest {
 
 	@Test
 	public void fixedPoolTwoAcquire()
-			throws InterruptedException, IOException {
+			throws ExecutionException, InterruptedException, IOException {
 		final ScheduledExecutorService service = Executors.newScheduledThreadPool(2);
 		int echoServerPort = SocketUtils.findAvailableTcpPort();
 		TcpClientTests.EchoServer echoServer = new TcpClientTests.EchoServer(echoServerPort);
 
+		java.util.concurrent.Future<?> f1 = null;
+		java.util.concurrent.Future<?> f2 = null;
+		ScheduledFuture<?> sf = null;
 		try {
 			final InetSocketAddress address = InetSocketAddress.createUnresolved("localhost", echoServerPort);
 			ConnectionProvider pool = ConnectionProvider.fixed("fixedPoolTwoAcquire",
@@ -150,7 +155,7 @@ public class PooledConnectionProviderTest {
 			            .verifyErrorMatches(msg -> msg.getMessage().contains("Connection refused"));
 
 			//start the echo server
-			service.submit(echoServer);
+			f1 = service.submit(echoServer);
 			Thread.sleep(100);
 
 			//acquire 2
@@ -168,7 +173,7 @@ public class PooledConnectionProviderTest {
 
 			//next one will block until a previous one is released
 			long start = System.currentTimeMillis();
-			service.schedule(() -> c1.onStateChange(c1, ConnectionObserver.State.DISCONNECTING), 500, TimeUnit
+			sf = service.schedule(() -> c1.onStateChange(c1, ConnectionObserver.State.DISCONNECTING), 500, TimeUnit
 					.MILLISECONDS);
 
 
@@ -194,7 +199,7 @@ public class PooledConnectionProviderTest {
 			PooledConnectionProvider.Pool defaultPool = c1.pool;
 
 			CountDownLatch latch = new CountDownLatch(1);
-			service.submit(() -> {
+			f2 = service.submit(() -> {
 				while(defaultPool.activeConnections.get() > 0) {
 					LockSupport.parkNanos(100);
 				}
@@ -209,6 +214,12 @@ public class PooledConnectionProviderTest {
 		finally {
 			service.shutdownNow();
 			echoServer.close();
+			assertThat(f1).isNotNull();
+			assertThat(f1.get()).isNull();
+			assertThat(f2).isNotNull();
+			assertThat(f2.get()).isNull();
+			assertThat(sf).isNotNull();
+			assertThat(sf.get()).isNull();
 		}
 	}
 

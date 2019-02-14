@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,12 @@ package reactor.netty.http.server;
 
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
+import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
+import io.netty.util.ReferenceCountUtil;
 import reactor.netty.Connection;
 import reactor.netty.ConnectionObserver;
 
@@ -35,8 +38,10 @@ public class HttpToH2Operations extends HttpServerOperations {
 			ConnectionObserver listener,
 			HttpRequest request,
 			Http2Headers headers,
-			ConnectionInfo connectionInfo) {
-		super(c, listener, null, request, connectionInfo);
+			ConnectionInfo connectionInfo,
+			ServerCookieEncoder encoder,
+			ServerCookieDecoder decoder) {
+		super(c, listener, null, request, connectionInfo, encoder, decoder);
 
 		this.http2Headers = headers;
 	}
@@ -52,7 +57,14 @@ public class HttpToH2Operations extends HttpServerOperations {
 			return;
 		}
 		else if(msg instanceof Http2HeadersFrame) {
-			listener().onStateChange(this, ConnectionObserver.State.CONFIGURED);
+			try {
+				listener().onStateChange(this, HttpServerState.REQUEST_RECEIVED);
+			}
+			catch (Exception e) {
+				onInboundError(e);
+				ReferenceCountUtil.release(msg);
+				return;
+			}
 			if (((Http2HeadersFrame) msg).isEndStream()) {
 				super.onInboundNext(ctx, msg);
 			}

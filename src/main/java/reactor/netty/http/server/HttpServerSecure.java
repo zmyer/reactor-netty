@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Pivotal Software Inc, All Rights Reserved.
+ * Copyright (c) 2011-2019 Pivotal Software Inc, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,17 +26,20 @@ import reactor.netty.tcp.TcpServer;
  */
 final class HttpServerSecure extends HttpServerOperator {
 
-	final Consumer<? super SslProvider.SslContextSpec> sslProviderBuilder;
+	final SslProvider sslProvider;
 
 	HttpServerSecure(HttpServer server,
 			Consumer<? super SslProvider.SslContextSpec> sslProviderBuilder) {
 		super(server);
 		Objects.requireNonNull(sslProviderBuilder, "sslProviderBuilder");
-		this.sslProviderBuilder = sslProviderBuilder;
+
+		SslProvider.SslContextSpec builder = SslProvider.builder();
+		sslProviderBuilder.accept(builder);
+		this.sslProvider = ((SslProvider.Builder) builder).build();
 	}
 
 	@Override
 	protected TcpServer tcpConfiguration() {
-		return source.tcpConfiguration().secure(this.sslProviderBuilder);
+		return source.tcpConfiguration().secure(this.sslProvider);
 	}
 }
